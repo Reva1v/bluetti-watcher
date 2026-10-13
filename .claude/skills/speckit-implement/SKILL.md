@@ -152,21 +152,40 @@ You **MUST** consider the user input before proceeding (if not empty).
    - **Task details**: ID, description, file paths, parallel markers [P]
    - **Execution flow**: Order and dependency requirements
 
-6. Execute implementation following the task plan:
+6. **Dispatch plan** (before each phase, and again whenever a checkpoint unblocks new work): sort the runnable tasks into
+   **packets** and decide, per packet, inline or subagent.
+   - A packet goes to a **subagent** when all hold: it owns its files (disjoint from every other packet and from your
+     inline work), it implements against an interface you can write down exactly now (signatures, types, file paths),
+     and its own tests prove it done. Typical: a pure module with its tests, an adapter behind a trait, an API layer
+     against a fixed store.
+   - Keep **inline**: shared files (crate/module roots, manifests, entry points, service wiring), integration that joins
+     packets, tasks needing the owner's hardware or judgement (stop-points, design approval), and one-file tasks where
+     writing the brief costs more than the work.
+   - Commit first, then launch all subagent packets in one message: `Agent` with `subagent_type: general-purpose`,
+     `isolation: worktree`, `run_in_background: true`. The brief is self-contained: task IDs, owned files, the exact
+     public interface (other packets code against it), docs to read, project rules (format/lint/test gates, commit
+     language and trailer, no push, mark its tasks `[X]`), and a short final report (files, API as built with any
+     deviation, tests, leftovers). For a graph-indexed project, also pass the graph project name and found symbols.
+   - While packets run, do inline work on files no packet owns.
+   - On each completion: merge its worktree branch, resolve conflicts in shared files, run the full test suite, check
+     its reported API against the brief, fix deviations in the wiring.
+   - Done when every runnable task of the phase is either done inline or in a merged packet with the full suite green.
+
+7. Execute implementation following the task plan:
    - **Phase-by-phase execution**: Complete each phase before moving to the next
    - **Respect dependencies**: Run sequential tasks in order, parallel tasks [P] can run together
    - **Follow TDD approach**: Execute test tasks before their corresponding implementation tasks
    - **File-based coordination**: Tasks affecting the same files must run sequentially
    - **Validation checkpoints**: Verify each phase completion before proceeding
 
-7. Implementation execution rules:
+8. Implementation execution rules:
    - **Setup first**: Initialize project structure, dependencies, configuration
    - **Tests before code**: If you need to write tests for contracts, entities, and integration scenarios
    - **Core development**: Implement models, services, CLI commands, endpoints
    - **Integration work**: Database connections, middleware, logging, external services
    - **Polish and validation**: Unit tests, performance optimization, documentation
 
-8. Progress tracking and error handling:
+9. Progress tracking and error handling:
    - Report progress after each completed task
    - Halt execution if any non-parallel task fails
    - For parallel tasks [P], continue with successful tasks, report failed ones
@@ -174,7 +193,7 @@ You **MUST** consider the user input before proceeding (if not empty).
    - Suggest next steps if implementation cannot proceed
    - **IMPORTANT** For completed tasks, make sure to mark the task off as [X] in the tasks file.
 
-9. Completion validation:
+10. Completion validation:
    - Verify all required tasks are completed
    - Check that implemented features match the original specification
    - Validate that tests pass and coverage meets requirements
