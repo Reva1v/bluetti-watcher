@@ -417,11 +417,156 @@
   function pickRange(range) {
     if (range === S.range) return;
     S.range = range;
-    for (const b of document.querySelectorAll('.tabs button')) b.setAttribute('aria-pressed', String(b.dataset.range === range));
+    for (const b of document.querySelectorAll('.hist .tabs button')) b.setAttribute('aria-pressed', String(b.dataset.range === range));
     const name = RANGES[range][1];
     $('ch-soc').setAttribute('aria-label', 'График заряда за ' + name);
     $('ch-pow').setAttribute('aria-label', 'График мощности за ' + name + ': вход и нагрузка');
     loadHistory();
+  }
+
+  // ---------- график ДТЭК (/api/dtek, SSE `dtek`) ----------
+  const D = { v: null, day: 0, minute: '' };
+  const BOLT = 'M13.5 2 L5 13.5 H11 L10 22 L19 10 H13 Z';
+  const CELL = {
+    yes: ['', 'свет есть'], no: ['no', 'света нет'], first: ['first', 'света нет первые полчаса'],
+    second: ['second', 'света нет вторые полчаса'], maybe: ['maybe', 'возможно отключение'],
+    mfirst: ['mfirst', 'возможно отключение в первые полчаса'], msecond: ['msecond', 'возможно отключение во вторые полчаса'],
+  };
+  const OFF_HALVES = { no: [1, 1], first: [1, 0], second: [0, 1] };
+  const ymd = (d) => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+  function parseDay(s) { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); }
+  const queueName = (q) => String(q || '').replace(/^GPV/, '');
+
+  function boltSvg(crossed) {
+    const ns = 'http://www.w3.org/2000/svg';
+    const s = document.createElementNS(ns, 'svg');
+    s.setAttribute('viewBox', '0 0 24 24');
+    s.setAttribute('width', '15');
+    s.setAttribute('height', '15');
+    s.setAttribute('aria-hidden', 'true');
+    const p = document.createElementNS(ns, 'path');
+    p.setAttribute('d', BOLT);
+    p.setAttribute('fill', 'currentColor');
+    s.appendChild(p);
+    if (crossed) {
+      const l = document.createElementNS(ns, 'path');
+      l.setAttribute('d', 'M3.5 3.5 L20.5 20.5');
+      l.setAttribute('stroke', 'currentColor');
+      l.setAttribute('stroke-width', '2.2');
+      l.setAttribute('stroke-linecap', 'round');
+      s.appendChild(l);
+    }
+    return s;
+  }
+
+  // Дни ответа, у которых есть дата сегодня/завтра по часам ПК (подписи считаем сами — ответ мог устареть).
+  function dtekDays() {
+    const v = D.v, today = ymd(new Date());
+    const t = new Date(); t.setDate(t.getDate() + 1);
+    const tomorrow = ymd(t);
+    const by = new Map((v.days || []).map((d) => [d.date, d]));
+    return [[today, 'Сегодня'], [tomorrow, 'Завтра']].map(([date, label]) => ({ date, label, cells: (by.get(date) || {}).cells || null }));
+  }
+
+  // Состояние «сейчас» по получасам сегодня и завтра: окна подряд — одно, `maybe` светом не считается.
+  function dtekNow(days) {
+    const slots = [];
+    for (const d of days) {
+      if (!d.cells) break;
+      const base = parseDay(d.date).getTime();
+      d.cells.forEach((c, h) => {
+        const off = OFF_HALVES[c] || [0, 0];
+        const known = c in CELL;
+        for (let k = 0; k < 2; k++) {
+          const t = new Date(base); t.setHours(h, k * 30, 0, 0);
+          slots.push({ t, off: !!off[k], known, today: d === days[0] });
+        }
+      });
+    }
+    const nowMs = Date.now();
+    const i = slots.findIndex((s, j) => s.t <= nowMs && (j + 1 >= slots.length || slots[j + 1].t > nowMs));
+    if (i < 0 || !slots[i].today || nowMs - slots[i].t > 1800e3) return { cls: '', text: 'Расписания нет' };
+    const cur = slots[i];
+    if (!cur.known) return { cls: '', text: 'Нет данных на этот час' };
+    let j = i;
+    while (j < slots.length && slots[j].known && slots[j].off === cur.off) j++;
+    const end = j < slots.length ? slots[j].t : null;
+    const endTxt = end ? (ymd(end) === ymd(cur.t) ? hm(end) : 'завтра ' + hm(end)) : '';
+    if (cur.off) return { cls: 'out', text: end ? 'Света нет до ' + endTxt : 'Света нет' };
+    if (end) return { cls: 'on', text: slots[j].known ? 'Свет есть до ' + endTxt : 'Свет есть' };
+    const anyToday = slots.some((s) => s.today && s.off);
+    return { cls: 'on', text: anyToday ? 'Сегодня больше без отключений' : 'Сегодня без отключений' };
+  }
+
+  function renderDtek() {
+    const v = D.v;
+    const on = !!(v && v.enabled);
+    show('dtek', on);
+    if (!on) return;
+    const now = new Date();
+    D.minute = ymd(now) + ' ' + hm(now);
+    const days = dtekDays();
+    if (!days[D.day].cells) D.day = 0;
+    setText('dtek-addr', v.address || '');
+
+    const st = dtekNow(days);
+    const pill = $('dtek-pill'), pc = 'pill dtek-pill' + (st.cls ? ' ' + st.cls : '');
+    if (pill.className !== pc) pill.className = pc;
+    setText('dtek-pill-text', st.text);
+
+    document.querySelectorAll('#dtek-tabs button').forEach((b, k) => {
+      const d = days[k];
+      const txt = d.label + ' ' + dm(parseDay(d.date)) + (d.cells ? '' : ' · ещё нет');
+      if (b.textContent !== txt) b.textContent = txt;
+      b.disabled = !d.cells;
+      b.setAttribute('aria-pressed', String(k === D.day));
+    });
+
+    const day = days[D.day];
+    show('dtek-none', !day.cells);
+    show('dtek-grid', !!day.cells);
+    if (day.cells) {
+      const curH = D.day === 0 ? now.getHours() : -1;
+      const items = day.cells.map((c, h) => {
+        const known = CELL[c];
+        const [cls, what] = known || ['unknown', 'нет данных'];
+        const e = el('div', 'dc' + (cls ? ' ' + cls : '') + (h === curH ? ' cur' : ''));
+        e.setAttribute('role', 'img');
+        e.setAttribute('aria-label', pad(h) + ':00–' + pad((h + 1) % 24) + ':00: ' + what + (h === curH ? ', текущий час' : ''));
+        e.title = what;
+        e.append(known ? boltSvg(!!OFF_HALVES[c]) : el('i', 'dc-q', '?'), el('span', '', pad(h) + ':00'));
+        return e;
+      });
+      $('dtek-grid').replaceChildren(...items);
+    }
+
+    const parts = [];
+    const up = /^(\d\d\.\d\d)\.\d{4}\s+(\d\d:\d\d)/.exec(v.update || '');
+    if (up) parts.push('ДТЭК обновил ' + up[1] + ' ' + up[2]);
+    else if (v.update) parts.push('ДТЭК обновил ' + v.update);
+    if (v.collected) {
+      const c = new Date(v.collected);
+      parts.push('собрано ' + (ymd(c) === ymd(now) ? hm(c) : dm(c) + ' ' + hm(c)));
+    }
+    const cand = (v.candidates || []).map(queueName);
+    if (v.queueStatus === 'same' && cand.length > 1) parts.push('очереди ' + cand.join(', ') + ' (совпадают)');
+    else if (v.queue) parts.push('очередь ' + queueName(v.queue) + (v.queueStatus === 'guess' ? ' (уточняется)' : ''));
+    setText('dtek-meta', parts.join(' · '));
+    show('dtek-stale', !!v.stale);
+    show('dtek-err', !!v.error);
+    if (v.error) setText('dtek-err', 'Ошибка обновления: ' + v.error);
+  }
+
+  // Раз в минуту из 1-секундного тикера: текущий час и плашка.
+  function tickDtek() {
+    if (!D.v || !D.v.enabled) return;
+    const now = new Date();
+    if (ymd(now) + ' ' + hm(now) !== D.minute) renderDtek();
+  }
+
+  function setDtek(v) { D.v = v; renderDtek(); }
+  async function loadDtek() {
+    try { setDtek(await getJSON('/api/dtek')); } catch (e) { /* нет эндпоинта или связи — карточка остаётся как была */ }
   }
 
   // ---------- network ----------
@@ -456,9 +601,10 @@
     es = new EventSource('/api/stream');
     es.onopen = () => {
       backoff = 1000;
-      if (!S.conn) { setConn(true); loadOutages(); loadEvents(); loadHistory(); }
+      if (!S.conn) { setConn(true); loadOutages(); loadEvents(); loadHistory(); loadDtek(); }
     };
     es.addEventListener('now', (e) => { setConn(true); setNow(JSON.parse(e.data)); maybeRefreshHistory(); });
+    es.addEventListener('dtek', (e) => setDtek(JSON.parse(e.data)));
     es.addEventListener('event', (e) => {
       const ev = JSON.parse(e.data);
       S.events.unshift(ev);
@@ -477,9 +623,10 @@
 
   // ---------- 1 s ticker, only while visible ----------
   let timer = 0;
+  function tick() { render(); tickDtek(); }
   function syncTimer() {
     const visible = document.visibilityState === 'visible';
-    if (visible && !timer) { timer = setInterval(render, 1000); render(); maybeRefreshHistory(); }
+    if (visible && !timer) { timer = setInterval(tick, 1000); tick(); maybeRefreshHistory(); }
     else if (!visible && timer) { clearInterval(timer); timer = 0; }
   }
 
@@ -518,13 +665,18 @@
 
   // ---------- start ----------
   for (const b of document.querySelectorAll('.seg button')) b.addEventListener('click', () => setMode(b.dataset.mode));
-  for (const b of document.querySelectorAll('.tabs button')) b.addEventListener('click', () => pickRange(b.dataset.range));
+  for (const b of document.querySelectorAll('.hist .tabs button')) b.addEventListener('click', () => pickRange(b.dataset.range));
+  for (const b of document.querySelectorAll('#dtek-tabs button')) {
+    b.addEventListener('click', () => { D.day = Number(b.dataset.day); renderDtek(); });
+  }
   document.addEventListener('visibilitychange', syncTimer);
 
   getJSON('/api/now').then(setNow, () => setConn(false));
   loadOutages();
   loadEvents();
   loadHistory();
+  loadDtek();
+  setInterval(loadDtek, 300e3);
   connect();
   syncTimer();
 })();

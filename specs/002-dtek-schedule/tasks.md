@@ -8,5 +8,5 @@
 - [ ] D006 `src/dtek/mod.rs`: `DtekView` по контракту plan.md, `view()`; тест формы
 - [ ] D007 `src/service.rs` + `src/main.rs`: задача обновления раз в 30 мин, кэш в `meta`, `watch` → HTTP, наблюдение отключений для `queue`, события `dtek-failed/ok`
 - [ ] D008 `src/http/mod.rs`: `GET /api/dtek`, `event: dtek` в SSE; тесты
-- [ ] D009 `src/http/web/*`: карточка «График ДТЭК» перед «Отключениями» по plan.md
+- [X] D009 `src/http/web/*`: карточка «График ДТЭК» перед «Отключениями» по plan.md
 - [ ] D010 Конфиг владельца: `[dtek] enabled = true`, адрес, 5 кандидатов; переустановка; сверка сетки с сайтом ДТЭК (SC-001)

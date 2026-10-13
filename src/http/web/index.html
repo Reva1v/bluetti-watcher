@@ -141,6 +141,33 @@
   <span id="hist-empty" class="dim" hidden>Показаний за этот период нет.</span>
 </section>
 
+<section id="dtek" class="card dtek" aria-labelledby="dtek-title" hidden>
+  <div class="dtek-head">
+    <div class="dtek-id">
+      <span id="dtek-title" class="label">График отключений ДТЭК</span>
+      <span id="dtek-addr" class="dtek-addr"></span>
+      <span id="dtek-pill" class="pill dtek-pill"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path d="M13.5 2 L5 13.5 H11 L10 22 L19 10 H13 Z" fill="currentColor"></path></svg><span id="dtek-pill-text"></span></span>
+    </div>
+    <div class="tabs" id="dtek-tabs" role="group" aria-label="День">
+      <button type="button" data-day="0" aria-pressed="true">Сегодня</button>
+      <button type="button" data-day="1" aria-pressed="false">Завтра</button>
+    </div>
+  </div>
+  <div id="dtek-grid" class="dtek-grid" role="group" aria-label="Часы"></div>
+  <span id="dtek-none" class="dim" hidden>Расписания нет.</span>
+  <div class="legend dtek-legend" aria-hidden="true">
+    <span class="li"><i class="dsw now"></i>текущий час</span>
+    <span class="li"><i class="dsw"></i>свет есть</span>
+    <span class="li"><i class="dsw no"></i>света нет</span>
+    <span class="li"><i class="dsw maybe"></i>возможно отключение</span>
+  </div>
+  <div class="dtek-foot">
+    <span id="dtek-meta"></span>
+    <span id="dtek-stale" class="dtek-stale" hidden>данные старше 1,5 ч</span>
+    <span id="dtek-err" class="err" hidden></span>
+  </div>
+</section>
+
 <section class="lists">
   <div class="card outages">
     <h2>Отключения</h2>
