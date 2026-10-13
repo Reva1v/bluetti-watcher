@@ -354,12 +354,18 @@ fn us4_6_no_rehibernate_within_two_minutes() {
 /// SC-004: разряд 25 % → 4 %, одно показание в минуту; гибернация ровно одна, после предупреждения, до < 3 %,
 /// ложное показание 0 % и неполное по пути ничего не запускают.
 fn drain(minutes_per_percent: u32) -> Sim {
+    drain_rate(25, 1, minutes_per_percent)
+}
+
+/// Разряд от `start` % по `percent` процентов за `minutes` минут (2/1 — полная нагрузка 1800 Вт).
+fn drain_rate(start: u8, percent: u32, minutes: u32) -> Sim {
     let mut sim = Sim::new();
-    sim.read(25, 150);
-    sim.read(25, 150);
+    sim.read(start, 150);
+    sim.read(start, 150);
     let mut i = 0u32;
     loop {
-        let soc = 25 - (i / minutes_per_percent) as u8;
+        let soc = i32::from(start) - (i * percent / minutes) as i32;
+        let soc = soc.max(0) as u8;
         if soc < 4 {
             break;
         }
@@ -395,6 +401,20 @@ fn sc004_drain_hibernates_exactly_once_before_3_percent() {
         assert!(sim.statuses.iter().any(|(_, s, r)| *s == ReadStatus::Rejected && *r == Some("implausible")));
         assert!(sim.statuses.iter().any(|(_, s, r)| *s == ReadStatus::Rejected && *r == Some("incomplete")));
         assert!(sim.event_times("hibernate-delayed").is_empty(), "одиночное ложное показание — не rebase");
+    }
+}
+
+/// Быстрый разряд (FR-025a): пороги поднимаются заранее, гибернация не позже 3 %.
+#[test]
+fn sc004_fast_drain_hibernates_before_3_percent() {
+    for (start, pct, min) in [(25, 1, 1), (50, 2, 1)] {
+        let sim = drain_rate(start, pct, min);
+        assert_eq!(sim.hibernations.len(), 1, "{pct} % за {min} мин");
+        let (hib_at, soc) = sim.hibernations[0];
+        assert!(soc >= 3, "{pct} %/мин: гибернация на {soc} %");
+        let warns = sim.event_times("hibernate-warn");
+        assert_eq!(warns.len(), 1);
+        assert!(hib_at - warns[0] >= 180 * SEC);
     }
 }
 

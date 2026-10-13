@@ -42,6 +42,40 @@ pub fn threshold(l: Level, cfg: &Config) -> u8 {
     }
 }
 
+/// Скорость разряда с начала отключения, % в минуту; `0` — данных мало (меньше 5 минут или падение < 2 %).
+/// Не выше предела правдоподобия: скачок не разгоняет пороги.
+pub fn drain_per_min(s: &DecisionState, soc: u8, now: Ts, cfg: &Config) -> f64 {
+    let Some(o) = &s.outage else { return 0.0 };
+    let (Some(start), elapsed) = (o.soc_start, now - o.start_ts) else { return 0.0 };
+    if elapsed < 5 * MIN || start < soc + 2 {
+        return 0.0;
+    }
+    (f64::from(start - soc) / (elapsed as f64 / MIN as f64)).min(cfg.guards.soc_rate_per_min)
+}
+
+/// Порог с упреждением по скорости разряда (FR-025a). Пока ждём согласия двух показаний и паузу после
+/// предупреждения, быстрый разряд (нагрузка 1800 Вт ≈ 2 %/мин) успевает съесть несколько процентов: порог гибернации
+/// поднимается на расход за `agree_sec`, предупреждение — ещё на расход за `hibernate_after_warn_sec + agree_sec`,
+/// «мало» и «критично» — не ниже предупреждения.
+/// При медленном разряде (< ~0,3 %/мин) пороги равны настроенным.
+pub fn effective_threshold(l: Level, rate: f64, cfg: &Config) -> u8 {
+    let agree_min = f64::from(cfg.levels.agree_sec) / 60.0;
+    let after_warn_min = f64::from(cfg.levels.hibernate_after_warn_sec) / 60.0;
+    let hibernate = cfg.levels.hibernate.saturating_add((rate * agree_min).round() as u8).min(100);
+    let warn = cfg
+        .levels
+        .warn
+        .max(hibernate.saturating_add((rate * (after_warn_min + agree_min)).round() as u8))
+        .min(100);
+    // Лестница идёт по одной ступени за цикл: верхние ступени не ниже предупреждения, иначе оно ждёт их.
+    match l {
+        Level::Hibernate => hibernate,
+        Level::Warn => warn,
+        Level::Critical => cfg.levels.critical.max(warn),
+        Level::Low => cfg.levels.low.max(warn),
+    }
+}
+
 /// Вид уведомления уровня; по нему `report` узнаёт, какой уровень сработал.
 pub fn notify_kind(l: Level) -> Option<&'static str> {
     match l {
@@ -64,8 +98,9 @@ fn notify_key(kind: &str) -> String {
 /// Подтверждение после rebase считает показания, продолжающие серию гибернации, но не начинающие её.
 pub fn update_streaks(s: &mut DecisionState, soc: u8, now: Ts, step: Ts, cfg: &Config) {
     let hib_ran = s.level_streaks.contains_key(&Level::Hibernate);
+    let rate = drain_per_min(s, soc, now, cfg);
     for l in ALL {
-        if soc <= threshold(l, cfg) {
+        if soc <= effective_threshold(l, rate, cfg) {
             s.level_streaks
                 .entry(l)
                 .and_modify(|st| st.run_ms += step)
@@ -405,6 +440,21 @@ mod tests {
         assert_eq!(s.rebase_confirm_ms, 2 * MIN);
         update_streaks(&mut s, 6, 3 * MIN, MIN, &c);
         assert_eq!(s.rebase_confirm_ms, 0);
+    }
+
+    #[test]
+    fn thresholds_follow_drain_rate() {
+        let c = cfg();
+        assert_eq!(effective_threshold(Level::Hibernate, 0.0, &c), 5);
+        assert_eq!(effective_threshold(Level::Warn, 0.0, &c), 7);
+        assert_eq!(effective_threshold(Level::Warn, 0.25, &c), 7, "медленный разряд — без упреждения");
+        assert_eq!(effective_threshold(Level::Hibernate, 1.0, &c), 7);
+        assert_eq!(effective_threshold(Level::Warn, 1.0, &c), 12);
+        assert_eq!(effective_threshold(Level::Hibernate, 2.0, &c), 8);
+        assert_eq!(effective_threshold(Level::Warn, 2.0, &c), 17);
+        assert_eq!(effective_threshold(Level::Critical, 2.0, &c), 17, "критично не ниже предупреждения");
+        assert_eq!(effective_threshold(Level::Critical, 0.0, &c), 10);
+        assert_eq!(effective_threshold(Level::Low, 2.0, &c), 20);
     }
 
     #[test]
