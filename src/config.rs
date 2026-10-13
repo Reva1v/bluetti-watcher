@@ -67,7 +67,7 @@ impl Default for Config {
             port: 8765,
             poll_sec: 60,
             dry_run: false,
-            station: Station { capacity_wh: 1152.0, efficiency: 0.85 },
+            station: Station { capacity_wh: 1440.0, efficiency: 0.85 },
             mains: Mains { lost_sec: 180, back_sec: 180 },
             levels: Levels {
                 low: 20,

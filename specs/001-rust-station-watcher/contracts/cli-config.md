@@ -27,7 +27,7 @@ poll_sec = 60
 dry_run = false
 
 [station]
-capacity_wh = 1152          # AC180P
+capacity_wh = 1440          # AC180P (1440 Вт·ч, 1800 Вт)
 efficiency = 0.85
 
 [mains]
