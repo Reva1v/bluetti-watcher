@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::clock::{MIN, Ts};
@@ -57,6 +57,70 @@ pub struct Outage {
     pub hibernated: bool,
 }
 
+/// Период графиков `/api/history`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Range {
+    H6,
+    H24,
+    D7,
+    D30,
+}
+
+impl Range {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "6h" => Some(Self::H6),
+            "24h" => Some(Self::H24),
+            "7d" => Some(Self::D7),
+            "30d" => Some(Self::D30),
+            _ => None,
+        }
+    }
+
+    pub fn span(self) -> Ts {
+        let h = 60 * MIN;
+        match self {
+            Self::H6 => 6 * h,
+            Self::H24 => 24 * h,
+            Self::D7 => 7 * 24 * h,
+            Self::D30 => 30 * 24 * h,
+        }
+    }
+
+    /// Шаг точек, с: 6h/24h — сырые показания (опрос раз в минуту), 7d/30d — средние по 5/15 мин.
+    pub fn step(self) -> u32 {
+        match self {
+            Self::H6 | Self::H24 => 60,
+            Self::D7 => 300,
+            Self::D30 => 900,
+        }
+    }
+}
+
+/// Точка графика: `t` — unix-секунды, `in`/`out` — сумма AC и DC, Вт.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Point {
+    pub t: i64,
+    pub soc: Option<u8>,
+    #[serde(rename = "in")]
+    pub inp: Option<u32>,
+    pub out: Option<u32>,
+}
+
+/// Отключение на графике, unix-секунды.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Span {
+    pub start: i64,
+    pub end: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct History {
+    pub step: u32,
+    pub points: Vec<Point>,
+    pub outages: Vec<Span>,
+}
+
 pub struct Store {
     db: Connection,
 }
@@ -64,6 +128,16 @@ pub struct Store {
 impl Store {
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         Self::init(Connection::open(path)?)
+    }
+
+    /// Соединение только для чтения (HTTP-сервер): схему не трогает, БД должна уже существовать.
+    pub fn open_read(path: &Path) -> rusqlite::Result<Self> {
+        let db = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_URI,
+        )?;
+        db.busy_timeout(std::time::Duration::from_secs(2))?;
+        Ok(Self { db })
     }
 
     pub fn in_memory() -> rusqlite::Result<Self> {
@@ -229,6 +303,66 @@ impl Store {
         )?;
         Ok((all >= 10).then(|| ok as f64 / all as f64))
     }
+
+    /// История для графиков за `range` до `now`, только принятые показания. Сырые точки для 6h/24h, средние
+    /// по корзинам для 7d/30d — всё агрегирует SQLite по диапазону первичного ключа `ts`.
+    pub fn history(&self, range: Range, now: Ts) -> rusqlite::Result<History> {
+        let from = now - range.span();
+        let bucket: Ts = match range {
+            Range::H6 | Range::H24 => 1,
+            r => Ts::from(r.step()) * 1000,
+        };
+        let mut st = self.db.prepare_cached(
+            "SELECT (ts / ?3) * ?3 AS b,
+                    CAST(ROUND(AVG(soc)) AS INTEGER),
+                    CAST(ROUND(AVG(COALESCE(ac_in_w, 0) + COALESCE(dc_in_w, 0))) AS INTEGER),
+                    CAST(ROUND(AVG(COALESCE(ac_out_w, 0) + COALESCE(dc_out_w, 0))) AS INTEGER)
+             FROM readings WHERE ts BETWEEN ?1 AND ?2 AND status = 'accepted'
+             GROUP BY b ORDER BY b",
+        )?;
+        let points = st
+            .query_map(params![from, now, bucket], |r| {
+                Ok(Point { t: r.get::<_, i64>(0)? / 1000, soc: r.get(1)?, inp: r.get(2)?, out: r.get(3)? })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut st = self.db.prepare_cached(
+            "SELECT start_ts, end_ts FROM outages
+             WHERE start_ts <= ?2 AND (end_ts IS NULL OR end_ts >= ?1) ORDER BY start_ts",
+        )?;
+        let outages = st
+            .query_map([from, now], |r| {
+                Ok(Span {
+                    start: r.get::<_, i64>(0)? / 1000,
+                    end: r.get::<_, Option<i64>>(1)?.map(|e| e / 1000),
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(History { step: range.step(), points, outages })
+    }
+
+    /// Пакетная вставка в одной транзакции (тесты и импорт).
+    pub fn insert_many(&mut self, rows: &[(Reading, ReadStatus)]) -> rusqlite::Result<()> {
+        let tx = self.db.transaction()?;
+        {
+            let mut st = tx.prepare_cached(
+                "INSERT OR REPLACE INTO readings (ts, soc, ac_in_w, ac_out_w, dc_in_w, dc_out_w, ac_in_v, status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?;
+            for (r, status) in rows {
+                st.execute(params![
+                    r.ts,
+                    r.soc,
+                    r.ac_in_w,
+                    r.ac_out_w,
+                    r.dc_in_w,
+                    r.dc_out_w,
+                    r.ac_in_v,
+                    status.as_str()
+                ])?;
+            }
+        }
+        tx.commit()
+    }
 }
 
 fn row_to_reading(r: &rusqlite::Row<'_>) -> rusqlite::Result<Reading> {
@@ -293,6 +427,80 @@ mod tests {
         s.set_meta("x", &vec![1, 2]).unwrap();
         assert_eq!(s.get_meta::<Vec<i32>>("x"), Some(vec![1, 2]));
         assert_eq!(s.get_meta::<Vec<i32>>("y"), None);
+    }
+
+    #[test]
+    fn history_raw_and_buckets() {
+        let mut s = Store::in_memory().unwrap();
+        let now = 1_000 * 900 * 1000; // кратно 15 мин
+        let rows: Vec<_> = (0..30)
+            .map(|i| {
+                let r = Reading {
+                    ts: now - (29 - i) * MIN,
+                    soc: Some(50 + (i % 2) as u8),
+                    ac_in_w: Some(10),
+                    dc_in_w: Some(5),
+                    ac_out_w: Some(100),
+                    dc_out_w: Some(i as u32 % 2),
+                    ..Default::default()
+                };
+                (r, if i == 0 { ReadStatus::Rejected } else { ReadStatus::Accepted })
+            })
+            .collect();
+        s.insert_many(&rows).unwrap();
+        s.start_outage(now - 10 * MIN, Some(51)).unwrap();
+
+        let h = s.history(Range::H6, now).unwrap();
+        assert_eq!((h.step, h.points.len()), (60, 29));
+        assert_eq!(
+            h.points[0],
+            Point { t: (now - 28 * MIN) / 1000, soc: Some(51), inp: Some(15), out: Some(101) }
+        );
+        assert_eq!(h.outages, vec![Span { start: (now - 10 * MIN) / 1000, end: None }]);
+
+        let h = s.history(Range::D7, now).unwrap();
+        assert_eq!(h.step, 300);
+        // Корзины по 5 мин: последняя — одна точка ровно в `now`.
+        assert_eq!(h.points.len(), 7);
+        assert!(h.points.windows(2).all(|w| w[1].t - w[0].t == 300));
+        assert_eq!(s.history(Range::D30, now).unwrap().step, 900);
+        assert_eq!(Range::parse("1y"), None);
+    }
+
+    /// 30d на годе показаний раз в минуту ≤ 300 мс (T036): ~20 мс в release, ~35 мс в debug.
+    #[test]
+    fn history_30d_fast_on_a_year() {
+        let dir = std::env::temp_dir().join(format!("bw-hist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("station.db");
+        let _ = std::fs::remove_file(&path);
+        let mut s = Store::open(&path).unwrap();
+        let now: Ts = 1_760_000_000_000;
+        let rows: Vec<_> = (0..525_600i64)
+            .map(|i| {
+                let r = Reading {
+                    ts: now - i * MIN,
+                    soc: Some((i % 100) as u8),
+                    ac_in_w: Some(0),
+                    ac_out_w: Some(150),
+                    dc_in_w: Some(0),
+                    dc_out_w: Some(4),
+                    ac_in_v: Some(0.0),
+                };
+                (r, ReadStatus::Accepted)
+            })
+            .collect();
+        s.insert_many(&rows).unwrap();
+        drop(s);
+        let s = Store::open_read(&path).unwrap();
+        let t = std::time::Instant::now();
+        let h = s.history(Range::D30, now).unwrap();
+        let took = t.elapsed();
+        eprintln!("30d: {} точек за {took:?}", h.points.len());
+        assert_eq!(h.points.len(), 30 * 24 * 4 + 1);
+        assert!(took.as_millis() < 300, "{took:?}");
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
