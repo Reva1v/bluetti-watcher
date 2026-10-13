@@ -1,6 +1,6 @@
 #![windows_subsystem = "windows"]
 
-use bluetti_watcher::{config, console, logging, paths};
+use bluetti_watcher::{config, console, install, logging, paths};
 
 use std::process::ExitCode;
 
@@ -52,6 +52,16 @@ enum Command {
     Status,
     /// Только из задачи BluettiWatcherGpu: применить лимит GPU
     GpuApply,
+    /// Внутренняя: элевированная часть `install --elevated-setup` (запускается через UAC)
+    #[command(hide = true)]
+    ElevatedSetup {
+        #[arg(long)]
+        user_sid: String,
+        #[arg(long)]
+        bin_exe: std::path::PathBuf,
+        #[arg(long)]
+        report: std::path::PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -88,10 +98,17 @@ fn main() -> ExitCode {
             logging::init(Some(&paths.logs_dir()), has_console, false);
             cmd_gpu_apply(&paths)
         }
-        _ => {
+        Command::Install { mac, port, elevated_setup } => {
             logging::init(None, true, false);
-            eprintln!("команда ещё не реализована");
-            ExitCode::FAILURE
+            ExitCode::from(install::cmd_install(paths, mac, port, elevated_setup))
+        }
+        Command::Uninstall { purge } => {
+            logging::init(None, true, false);
+            ExitCode::from(install::cmd_uninstall(paths, purge))
+        }
+        Command::Status => ExitCode::from(install::cmd_status(&paths)),
+        Command::ElevatedSetup { user_sid, bin_exe, report } => {
+            ExitCode::from(install::cmd_elevated_setup(&user_sid, &bin_exe, &report))
         }
     }
 }

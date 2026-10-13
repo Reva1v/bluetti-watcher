@@ -9,6 +9,7 @@ pub mod config;
 pub mod console;
 pub mod decision;
 pub mod http;
+pub mod install;
 pub mod instance;
 pub mod logging;
 pub mod model;
