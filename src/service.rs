@@ -54,6 +54,8 @@ pub struct Channels {
     pub health: watch::Sender<HealthView>,
     pub events: broadcast::Sender<store::Event>,
     pub modes: mpsc::UnboundedReceiver<ManualMode>,
+    /// Закончившиеся отключения для выбора очереди ДТЭК; `None` — график выключен.
+    pub outages: Option<mpsc::UnboundedSender<crate::dtek::FinishedOutage>>,
 }
 
 pub struct Service<R: StationReader, C: Clock, B: PowerBackend> {
@@ -253,7 +255,18 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
                 Action::OutageStart { start_ts, soc } => {
                     log_db(self.store.start_outage(*start_ts, *soc).map(|_| ()))
                 }
-                Action::OutageEnd { end_ts, soc } => log_db(self.store.end_outage(*end_ts, *soc)),
+                Action::OutageEnd { end_ts, soc } => {
+                    let open = self
+                        .store
+                        .outages(1)
+                        .ok()
+                        .and_then(|v| v.into_iter().next())
+                        .filter(|o| o.end_ts.is_none());
+                    log_db(self.store.end_outage(*end_ts, *soc));
+                    if let (Some(tx), Some(o)) = (&self.channels.outages, open) {
+                        let _ = tx.send((o.start_ts, *end_ts));
+                    }
+                }
                 Action::NeedFreshReading => {}
             }
         }
@@ -499,6 +512,7 @@ mod tests {
         svc: Service<Fake, FakeClock, FakePower>,
         hibernations: Rc<RefCell<u32>>,
         notes: Rc<RefCell<Vec<String>>>,
+        outages: mpsc::UnboundedReceiver<crate::dtek::FinishedOutage>,
     }
 
     fn harness(reads: Vec<Result<ReadOutcome, MissReason>>) -> Harness {
@@ -506,6 +520,7 @@ mod tests {
         let (health, _) = watch::channel(HealthView::default());
         let (events, _) = broadcast::channel(16);
         let (_tx, modes) = mpsc::unbounded_channel();
+        let (outages_tx, outages_rx) = mpsc::unbounded_channel();
         let mut backend = FakePower {
             active: crate::power::HIGH_PERFORMANCE.into(),
             overlay: crate::power::OVERLAY_NONE.into(),
@@ -530,9 +545,9 @@ mod tests {
             Box::new(FakeHib(hibernations.clone())),
             Box::new(FakeNotify(notes.clone())),
             PathBuf::from("Z:/nonexistent/no-hibernate"),
-            Channels { now, health, events, modes },
+            Channels { now, health, events, modes, outages: Some(outages_tx) },
         );
-        Harness { svc, hibernations, notes }
+        Harness { svc, hibernations, notes, outages: outages_rx }
     }
 
     #[tokio::test]
@@ -569,6 +584,9 @@ mod tests {
         assert!(h.svc.store.get_meta::<PowerRestore>("power_restore").is_none());
         let o = &h.svc.store.outages(5).unwrap()[0];
         assert!(o.end_ts.is_some() && o.eco);
+        // Отключение уходит в выбор очереди ДТЭК.
+        assert_eq!(h.outages.try_recv().unwrap(), (o.start_ts, o.end_ts.unwrap()));
+        assert!(h.outages.try_recv().is_err());
         let kinds: Vec<String> = h.svc.store.recent_events(50).unwrap().into_iter().map(|e| e.kind).collect();
         assert!(kinds.contains(&"eco-on".to_string()) && kinds.contains(&"eco-off".to_string()), "{kinds:?}");
     }

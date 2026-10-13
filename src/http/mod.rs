@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::clock::{Clock, MIN, SystemClock, Ts, to_local_iso};
+use crate::dtek::DtekView;
 use crate::model::{EcoLevel, Mains, ManualMode};
 use crate::runtime::Source;
 use crate::store::{self, Range, Store};
@@ -111,6 +112,8 @@ pub struct AppState {
     pub events: broadcast::Sender<store::Event>,
     pub mode_tx: mpsc::UnboundedSender<ManualMode>,
     pub health: watch::Receiver<HealthView>,
+    /// Задача графика ДТЭК публикует при изменении; при `[dtek] enabled = false` — снимок «выключено».
+    pub dtek: watch::Receiver<DtekView>,
 }
 
 struct Shared {
@@ -160,6 +163,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/stream", get(stream))
         .route("/api/mode", post(mode))
         .route("/api/health", get(health))
+        .route("/api/dtek", get(dtek))
         .layer(middleware::from_fn_with_state(shared.clone(), host_guard))
         .with_state(shared)
 }
@@ -264,24 +268,39 @@ async fn events(State(s): St, Query(q): Query<LimitQuery>) -> Response {
     }
 }
 
-/// SSE: текущее состояние сразу, затем `event: now` на каждое обновление и `event: event` на каждое событие.
+/// SSE: текущее состояние сразу (`event: now`, затем `event: dtek`), затем `event: now` на каждое обновление,
+/// `event: dtek` на каждое изменение графика и `event: event` на каждое событие.
 async fn stream(State(s): St) -> Sse<impl Stream<Item = Result<sse::Event, Infallible>>> {
     let mut now_rx = s.app.now.clone();
     now_rx.mark_changed();
+    let mut dtek_rx = s.app.dtek.clone();
+    dtek_rx.mark_changed();
     let ev_rx = s.app.events.subscribe();
-    let st = futures_util::stream::unfold((now_rx, ev_rx), |(mut now_rx, mut ev_rx)| async move {
+    let init = Streams { now: now_rx, dtek: dtek_rx, dtek_open: true, events: ev_rx };
+    let st = futures_util::stream::unfold(init, |mut st| async move {
         loop {
             tokio::select! {
-                r = now_rx.changed() => {
+                biased;
+                r = st.now.changed() => {
                     r.ok()?;
-                    let v = now_rx.borrow_and_update().clone();
+                    let v = st.now.borrow_and_update().clone();
                     let e = sse::Event::default().event("now").json_data(v).ok()?;
-                    return Some((Ok(e), (now_rx, ev_rx)));
+                    return Some((Ok(e), st));
                 }
-                r = ev_rx.recv() => match r {
+                r = st.dtek.changed(), if st.dtek_open => {
+                    if r.is_err() {
+                        // Задачи графика нет (выключен): последний снимок уже отдан.
+                        st.dtek_open = false;
+                        continue;
+                    }
+                    let v = st.dtek.borrow_and_update().clone();
+                    let e = sse::Event::default().event("dtek").json_data(v).ok()?;
+                    return Some((Ok(e), st));
+                }
+                r = st.events.recv() => match r {
                     Ok(ev) => {
                         let e = sse::Event::default().event("event").json_data(EventView::from(ev)).ok()?;
-                        return Some((Ok(e), (now_rx, ev_rx)));
+                        return Some((Ok(e), st));
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => return None,
@@ -290,6 +309,17 @@ async fn stream(State(s): St) -> Sse<impl Stream<Item = Result<sse::Event, Infal
         }
     });
     Sse::new(st).keep_alive(KeepAlive::new().interval(Duration::from_secs(30)))
+}
+
+struct Streams {
+    now: watch::Receiver<NowView>,
+    dtek: watch::Receiver<DtekView>,
+    dtek_open: bool,
+    events: broadcast::Receiver<store::Event>,
+}
+
+async fn dtek(State(s): St) -> Json<DtekView> {
+    Json(s.app.dtek.borrow().clone())
 }
 
 #[derive(Deserialize)]
@@ -344,6 +374,7 @@ mod tests {
         now_tx: watch::Sender<NowView>,
         events: broadcast::Sender<store::Event>,
         _health_tx: watch::Sender<HealthView>,
+        dtek_tx: watch::Sender<DtekView>,
         dir: PathBuf,
     }
 
@@ -388,6 +419,7 @@ mod tests {
             watch::channel(HealthView { ok: true, version: "0.1.0".into(), ..Default::default() });
         let (events, _) = broadcast::channel(16);
         let (mode_tx, mode_rx) = mpsc::unbounded_channel();
+        let (dtek_tx, dtek_rx) = watch::channel(DtekView::disabled());
         let app = router(AppState {
             port: PORT,
             db_path,
@@ -395,8 +427,9 @@ mod tests {
             events: events.clone(),
             mode_tx,
             health: health_rx,
+            dtek: dtek_rx,
         });
-        Env { app, mode_rx, now_tx, events, _health_tx: health_tx, dir }
+        Env { app, mode_rx, now_tx, events, _health_tx: health_tx, dtek_tx, dir }
     }
 
     fn req(method: Method, uri: &str, host: Option<&str>) -> axum::http::request::Builder {
@@ -616,9 +649,19 @@ data: {"
             "{}",
             chunks[0]
         );
+        let c = body.next().await.unwrap().unwrap();
+        let c = String::from_utf8_lossy(&c);
+        assert!(c.starts_with("event: dtek\ndata: {") && c.contains("\"enabled\":false"), "{c}");
         e.now_tx.send_modify(|v| v.soc = Some(79));
         let c = body.next().await.unwrap().unwrap();
         assert!(String::from_utf8_lossy(&c).contains("\"soc\":79"));
+        e.dtek_tx.send_modify(|v| {
+            v.enabled = true;
+            v.queue = Some("GPV9.1".into());
+        });
+        let c = body.next().await.unwrap().unwrap();
+        let c = String::from_utf8_lossy(&c);
+        assert!(c.starts_with("event: dtek\ndata: {") && c.contains("\"queue\":\"GPV9.1\""), "{c}");
         e.events.send(store::Event { ts: 0, kind: "eco-on".into(), text: "Eco".into() }).unwrap();
         let c = body.next().await.unwrap().unwrap();
         let c = String::from_utf8_lossy(&c);
@@ -629,5 +672,37 @@ data: {"
             ) && c.contains("\"kind\":\"eco-on\""),
             "{c}"
         );
+    }
+
+    #[tokio::test]
+    async fn dtek_disabled_and_enabled_shapes() {
+        let e = env("dtek");
+        let (st, v) = get_json(&e.app, "/api/dtek").await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(
+            v,
+            json!({
+                "enabled": false, "address": null, "region": null, "queue": null, "queueStatus": null,
+                "candidates": [], "update": null, "collected": null, "stale": false, "error": null,
+                "now": null, "days": []
+            })
+        );
+        let cfg = crate::config::Dtek {
+            enabled: true,
+            address: "вул. Прикладна, 1".into(),
+            queues: vec!["GPV9.1".into(), "GPV21.1".into()],
+            ..Default::default()
+        };
+        e.dtek_tx.send_replace(crate::dtek::view(&cfg, None, &Default::default(), None, now_ms()));
+        let (_, v) = get_json(&e.app, "/api/dtek").await;
+        assert_eq!(v["enabled"], true);
+        assert_eq!(v["queue"], "GPV9.1");
+        assert_eq!(v["queueStatus"], "guess");
+        assert_eq!(v["candidates"], json!(["GPV9.1", "GPV21.1"]));
+        assert_eq!(v["now"], json!({ "power": "unknown", "until": null }));
+        assert_eq!(v["days"][0]["label"], "Сегодня");
+        assert_eq!(v["days"][1]["label"], "Завтра");
+        let r = req(Method::GET, "/api/dtek", Some("evil.example:8765")).body(Body::empty()).unwrap();
+        assert_eq!(e.app.clone().oneshot(r).await.unwrap().status(), StatusCode::FORBIDDEN);
     }
 }
