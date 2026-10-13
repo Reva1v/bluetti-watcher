@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Bluetti Watcher — отключение света</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;display=swap">
+<style>
+body{margin:0;background:#111111}
+a{color:#7FBAFF}a:hover{color:#A9D0FF}
+</style>
+</helmet>
+<div style="min-height: 100vh; background: #111111; background-image: repeating-linear-gradient(135deg, rgba(255,255,255,0.018) 0 2px, transparent 2px 9px); color: #E8ECEF; font-family: 'Golos Text', system-ui, sans-serif; font-size: 15px; line-height: 1.45">
+<div style="max-width: 1200px; margin: 0 auto; padding: 24px 24px 48px; box-sizing: border-box; display: flex; flex-direction: column; gap: 20px">
+
+<header style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px">
+<div style="display: flex; align-items: center; gap: 12px">
+<svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><rect x="3" y="8" width="25" height="18" rx="4" fill="none" stroke="#FF6F1A" stroke-width="2.2"></rect><rect x="29" y="13" width="3" height="8" rx="1.5" fill="#FF6F1A"></rect><path d="M17 11 L12 18 H16 L14 23 L20 15 H16 Z" fill="#FF6F1A"></path></svg>
+<div style="display: flex; flex-direction: column">
+<span style="font-weight: 700; font-size: 18px; letter-spacing: 0.2px">Bluetti Watcher</span>
+<span style="color: #9AA6AF; font-size: 13px">AC180P · AA:BB:CC:DD:EE:FF</span>
+</div>
+</div>
+<div style="display: flex; align-items: center; gap: 10px; color: #9AA6AF; font-size: 13px">
+<span style="width: 8px; height: 8px; border-radius: 50%; background: #5AA9FF; display: inline-block"></span>
+<span>Показание в 21:05 · 20 с назад</span>
+</div>
+</header>
+
+<div role="status" style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 16px; border-radius: 12px; background: #2D190B; border: 1px solid #8A3F10; color: #FFD5B8">
+<svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2 L19 18 H1 Z" fill="none" stroke="#FF6F1A" stroke-width="1.8" stroke-linejoin="round"></path><path d="M10 8 V12 M10 14.5 V15" stroke="#FF6F1A" stroke-width="1.8" stroke-linecap="round"></path></svg>
+<span style="flex: 1 1 320px">Гибернация в Windows выключена: на 5 % ПК не сможет уйти в гибернацию. Включается один раз командой <code style="font-family: 'JetBrains Mono', monospace; font-size: 13px; color: #FFE2CC">install --elevated-setup</code>.</span>
+</div>
+
+<section style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px">
+
+<div style="background: #1B1B1B; border: 1.5px solid #FF6F1A; border-radius: 16px; padding: 20px; display: flex; flex-direction: column; gap: 14px">
+<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px">
+<span style="color: #9AA6AF; font-size: 13px; text-transform: uppercase; letter-spacing: 0.8px">Заряд</span>
+<span style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; background: #3B1E0A; color: #FF9A52; font-size: 13px; font-weight: 600">Отключение · 1 ч 25 мин</span>
+</div>
+<div style="display: flex; align-items: baseline; gap: 6px">
+<span style="font-family: 'JetBrains Mono', monospace; font-size: 64px; font-weight: 600; line-height: 1; color: {{socColor}}">{{soc}}</span>
+<span style="font-size: 24px; color: #C9D1D7">%</span>
+</div>
+<div style="display: flex; flex-direction: column; gap: 6px">
+<div style="position: relative; height: 14px; border-radius: 7px; background: #2E2E2E; overflow: hidden">
+<div style="{{socBar}}"></div>
+<div style="position: absolute; left: 20%; top: 0; bottom: 0; width: 2px; background: #111111"></div>
+<div style="position: absolute; left: 10%; top: 0; bottom: 0; width: 2px; background: #111111"></div>
+<div style="position: absolute; left: 5%; top: 0; bottom: 0; width: 2px; background: #111111"></div>
+</div>
+<div style="position: relative; height: 16px; font-size: 11px; color: #8E9AA3; font-family: 'JetBrains Mono', monospace">
+<span style="position: absolute; left: 3%">5</span>
+<span style="position: absolute; left: 8.5%">10</span>
+<span style="position: absolute; left: 18.5%">20</span>
+<span style="position: absolute; right: 0">100</span>
+</div>
+</div>
+<span style="color: #9AA6AF; font-size: 14px">С 19:40, было 100 %. Работает от батареи.</span>
+</div>
+
+<div style="background: #1B1B1B; border: 1px solid #2E2E2E; border-radius: 16px; padding: 20px; display: flex; flex-direction: column; gap: 14px">
+<span style="color: #9AA6AF; font-size: 13px; text-transform: uppercase; letter-spacing: 0.8px">Осталось</span>
+<div style="display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap">
+<span style="font-family: 'JetBrains Mono', monospace; font-size: 52px; font-weight: 600; line-height: 1">4 ч 52</span>
+<span style="font-size: 20px; color: #C9D1D7">мин</span>
+</div>
+<span style="color: #C9D1D7">при нагрузке 186 Вт</span>
+<div style="display: flex; flex-direction: column; gap: 6px; padding-top: 10px; border-top: 1px solid #2E2E2E; font-size: 14px; color: #9AA6AF">
+<span>По скорости разряда: −17 % в час</span>
+<span>Гибернация на 5 % — примерно в 01:55</span>
+</div>
+</div>
+
+<div style="background: #1B1B1B; border: 1px solid #2E2E2E; border-radius: 16px; padding: 20px; display: flex; flex-direction: column; gap: 14px">
+<span style="color: #9AA6AF; font-size: 13px; text-transform: uppercase; letter-spacing: 0.8px">Режим ПК</span>
+<div role="group" aria-label="Режим" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; padding: 4px; background: #111111; border-radius: 12px; border: 1px solid #2E2E2E">
+<sc-for list="{{modes}}" as="m" hint-placeholder-count="3">
+<button type="button" onClick="{{m.pick}}" aria-pressed="{{m.pressed}}" style="{{m.style}}">{{m.label}}</button>
+</sc-for>
+</div>
+<div style="display: flex; flex-direction: column; gap: 8px; font-size: 14px">
+<span style="font-weight: 600; color: #FF9A52">{{modeTitle}}</span>
+<span style="color: #9AA6AF">{{modeDetail}}</span>
+</div>
+</div>
+
+</section>
+
+<section aria-label="Мощности" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px">
+<div style="background: #1B1B1B; border: 1px solid #2E2E2E; border-radius: 14px; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px">
+<span style="color: #9AA6AF; font-size: 13px">Вход AC</span>
+<span style="font-family: 'JetBrains Mono', monospace; font-size: 26px; font-weight: 600; color: #8E9AA3">0 <span style="font-size: 15px">Вт</span></span>
+</div>
+<div style="background: #1B1B1B; border: 1px solid #2E2E2E; border-radius: 14px; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px">
+<span style="color: #9AA6AF; font-size: 13px">Выход AC</span>
+<span style="font-family: 'JetBrains Mono', monospace; font-size: 26px; font-weight: 600; color: #FF6F1A">182 <span style="font-size: 15px">Вт</span></span>
+</div>
+<div style="background: #1B1B1B; border: 1px solid #2E2E2E; border-radius: 14px; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px">
+<span style="color: #9AA6AF; font-size: 13px">Вход DC</span>
+<span style="font-family: 'JetBrains Mono', monospace; font-size: 26px; font-weight: 600; color: #8E9AA3">0 <span style="font-size: 15px">Вт</span></span>
+</div>
+<div style="background: #1B1B1B; border: 1px solid #2E2E2E; border-radius: 14px; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px">
+<span style="color: #9AA6AF; font-size: 13px">Выход DC</span>
+<span style="font-family: 'JetBrains Mono', monospace; font-size: 26px; font-weight: 600; color: #FF6F1A">4 <span style="font-size: 15px">Вт</span></span>
+</div>
+<div style="background: #1B1B1B; border: 1px solid #2E2E2E; border-radius: 14px; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px">
+<span style="color: #9AA6AF; font-size: 13px">Напряжение сети</span>
+<span style="font-family: 'JetBrains Mono', monospace; font-size: 26px; font-weight: 600; color: #8E9AA3">0 <span style="font-size: 15px">В</span></span>
+</div>
+</section>
+
+<section style="background: #1B1B1B; border: 1px solid #2E2E2E; border-radius: 16px; padding: 20px; display: flex; flex-direction: column; gap: 18px">
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px">
+<h2 style="margin: 0; font-size: 18px; font-weight: 600">История</h2>
+<div role="group" aria-label="Период" style="display: flex; gap: 4px; padding: 4px; background: #111111; border-radius: 10px; border: 1px solid #2E2E2E">
+<sc-for list="{{periods}}" as="p" hint-placeholder-count="4">
+<button type="button" onClick="{{p.pick}}" aria-pressed="{{p.pressed}}" style="{{p.style}}">{{p.label}}</button>
+</sc-for>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px">
+<div style="display: flex; align-items: center; gap: 16px; font-size: 13px; color: #9AA6AF">
+<span style="color: #E8ECEF; font-weight: 600">Заряд, %</span>
+<span style="display: inline-flex; align-items: center; gap: 6px"><span style="width: 14px; height: 10px; background: #40210D; border-radius: 2px; display: inline-block"></span>Отключение</span>
+</div>
+<svg viewBox="0 0 1000 220" preserveAspectRatio="none" role="img" aria-label="График заряда за 6 часов: 100 % до 19:40, затем снижение до 74 %" style="width: 100%; height: 200px; display: block">
+<rect x="764" y="0" width="236" height="220" fill="#40210D" opacity="0.55"></rect>
+<line x1="0" y1="20" x2="1000" y2="20" stroke="#2E2E2E" stroke-width="1" vector-effect="non-scaling-stroke"></line>
+<line x1="0" y1="120" x2="1000" y2="120" stroke="#2E2E2E" stroke-width="1" vector-effect="non-scaling-stroke"></line>
+<line x1="0" y1="180" x2="1000" y2="180" stroke="#5C2A24" stroke-width="1" stroke-dasharray="4 4" vector-effect="non-scaling-stroke"></line>
+<line x1="0" y1="210" x2="1000" y2="210" stroke="#5C2A24" stroke-width="1" stroke-dasharray="4 4" vector-effect="non-scaling-stroke"></line>
+<polyline points="0,20 764,20 800,32 850,44 900,56 950,64 1000,72" fill="none" stroke="#FF6F1A" stroke-width="2.5" vector-effect="non-scaling-stroke" stroke-linejoin="round"></polyline>
+</svg>
+<div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #8E9AA3">
+<span>15:05</span><span>16:00</span><span>17:00</span><span>18:00</span><span>19:00</span><span>20:00</span><span>21:05</span>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 16px; font-size: 13px; color: #9AA6AF">
+<span style="color: #E8ECEF; font-weight: 600">Мощность, Вт</span>
+<span style="display: inline-flex; align-items: center; gap: 6px"><span style="width: 14px; height: 3px; background: #5AA9FF; display: inline-block"></span>Вход</span>
+<span style="display: inline-flex; align-items: center; gap: 6px"><span style="width: 14px; height: 3px; background: #FF6F1A; display: inline-block"></span>Нагрузка</span>
+</div>
+<svg viewBox="0 0 1000 160" preserveAspectRatio="none" role="img" aria-label="График мощности: вход около 200 Вт до отключения, затем 0; нагрузка около 180 Вт" style="width: 100%; height: 150px; display: block">
+<rect x="764" y="0" width="236" height="160" fill="#40210D" opacity="0.55"></rect>
+<line x1="0" y1="70" x2="1000" y2="70" stroke="#2E2E2E" stroke-width="1" vector-effect="non-scaling-stroke"></line>
+<line x1="0" y1="150" x2="1000" y2="150" stroke="#2E2E2E" stroke-width="1" vector-effect="non-scaling-stroke"></line>
+<polyline points="0,62 100,58 200,66 300,60 400,76 500,74 600,77 700,75 764,76 764,150 1000,150" fill="none" stroke="#5AA9FF" stroke-width="2.5" vector-effect="non-scaling-stroke" stroke-linejoin="round"></polyline>
+<polyline points="0,78 100,80 200,74 300,82 400,80 500,76 600,84 700,78 764,80 800,78 850,76 900,80 950,77 1000,77" fill="none" stroke="#FF6F1A" stroke-width="2.5" vector-effect="non-scaling-stroke" stroke-linejoin="round"></polyline>
+</svg>
+<div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #8E9AA3">
+<span>15:05</span><span>16:00</span><span>17:00</span><span>18:00</span><span>19:00</span><span>20:00</span><span>21:05</span>
+</div>
+</div>
+</section>
+
+<section style="display: flex; flex-wrap: wrap; gap: 16px">
+
+<div style="flex: 999 1 560px; min-width: 0; background: #1B1B1B; border: 1px solid #2E2E2E; border-radius: 16px; padding: 20px; display: flex; flex-direction: column; gap: 12px">
+<h2 style="margin: 0; font-size: 18px; font-weight: 600">Отключения</h2>
+<div style="overflow-x: auto">
+<table style="width: 100%; border-collapse: collapse; font-size: 14px; min-width: 520px">
+<thead>
+<tr style="color: #9AA6AF; text-align: left">
+<th style="padding: 8px 8px 8px 0; font-weight: 500">Начало</th>
+<th style="padding: 8px; font-weight: 500">Длительность</th>
+<th style="padding: 8px; font-weight: 500">Заряд</th>
+<th style="padding: 8px; font-weight: 500">Eco</th>
+<th style="padding: 8px 0 8px 8px; font-weight: 500">Гибернация</th>
+</tr>
+</thead>
+<tbody>
+<sc-for list="{{outages}}" as="o" hint-placeholder-count="4">
+<tr style="border-top: 1px solid #2E2E2E">
+<td style="padding: 10px 8px 10px 0">{{o.start}}</td>
+<td style="padding: 10px 8px; font-family: 'JetBrains Mono', monospace">{{o.dur}}</td>
+<td style="padding: 10px 8px; font-family: 'JetBrains Mono', monospace">{{o.soc}}</td>
+<td style="padding: 10px 8px; color: #C9D1D7">{{o.eco}}</td>
+<td style="padding: 10px 0 10px 8px; color: #C9D1D7">{{o.hib}}</td>
+</tr>
+</sc-for>
+</tbody>
+</table>
+</div>
+</div>
+
+<div style="flex: 1 1 320px; min-width: 0; background: #1B1B1B; border: 1px solid #2E2E2E; border-radius: 16px; padding: 20px; display: flex; flex-direction: column; gap: 12px">
+<h2 style="margin: 0; font-size: 18px; font-weight: 600">События</h2>
+<ol style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column">
+<sc-for list="{{events}}" as="e" hint-placeholder-count="6">
+<li style="display: flex; gap: 12px; padding: 9px 0; border-top: 1px solid #2E2E2E; font-size: 14px">
+<span style="font-family: 'JetBrains Mono', monospace; color: #8E9AA3; flex: 0 0 auto">{{e.time}}</span>
+<span style="{{e.style}}">{{e.text}}</span>
+</li>
+</sc-for>
+</ol>
+</div>
+
+</section>
+
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"soc":{"editor":"range","default":74,"min":0,"max":100,"step":1,"unit":"%"},"$preview":{"width":1280,"height":1720}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { mode: 'auto', period: '6h' };
+  }
+  renderVals() {
+    const seg = (on) => on
+      ? 'min-height: 44px; border: 0; border-radius: 9px; background: #FF6F1A; color: #160900; font: 600 15px "Golos Text", sans-serif; cursor: pointer'
+      : 'min-height: 44px; border: 0; border-radius: 9px; background: transparent; color: #C9D1D7; font: 500 15px "Golos Text", sans-serif; cursor: pointer';
+    const tab = (on) => on
+      ? 'min-height: 36px; padding: 0 14px; border: 0; border-radius: 7px; background: #3A3A3A; color: #E8ECEF; font: 600 14px "Golos Text", sans-serif; cursor: pointer'
+      : 'min-height: 36px; padding: 0 14px; border: 0; border-radius: 7px; background: transparent; color: #9AA6AF; font: 500 14px "Golos Text", sans-serif; cursor: pointer';
+    const modeText = {
+      auto: ['Eco включён автоматически в 19:43', 'Схема «Bluetti Eco»: CPU до 80 %, GPU 119 Вт, энергоэффективность, монитор гаснет через 3 мин. На 20 % включится глубокий eco.'],
+      eco: ['Eco выбран вручную', 'Держится до следующего изменения сети или до «Авто».'],
+      max: ['Максимум: eco снят', 'Прежняя схема питания до возвращения света или «Авто». Гибернация на 5 % всё равно сработает.'],
+    };
+    const modes = [['auto', 'Авто'], ['eco', 'Eco'], ['max', 'Максимум']].map(([id, label]) => ({
+      label, pressed: String(this.state.mode === id), style: seg(this.state.mode === id),
+      pick: () => this.setState({ mode: id }),
+    }));
+    const periods = [['6h', '6 ч'], ['24h', '24 ч'], ['7d', '7 д'], ['30d', '30 д']].map(([id, label]) => ({
+      label, pressed: String(this.state.period === id), style: tab(this.state.period === id),
+      pick: () => this.setState({ period: id }),
+    }));
+    const plain = 'color: #C9D1D7';
+    const warn = 'color: #FF9A52';
+    const soc = Math.max(0, Math.min(100, Math.round(this.props.soc ?? 74)));
+    const socColor = soc >= 50 ? '#3DD68C' : soc >= 20 ? '#F5C518' : '#FF4D4D';
+    return {
+      soc, socColor,
+      socBar: 'position: absolute; left: 0; top: 0; bottom: 0; width: ' + soc + '%; background: ' + socColor + '; border-radius: 7px',
+      modes, periods,
+      modeTitle: modeText[this.state.mode][0],
+      modeDetail: modeText[this.state.mode][1],
+      outages: [
+        { start: 'Сегодня 19:40', dur: 'идёт 1:25', soc: '100 → 74 %', eco: 'да', hib: '—' },
+        { start: '12.10 08:00', dur: '4:12', soc: '100 → 31 %', eco: 'глубокий', hib: 'нет' },
+        { start: '10.10 22:15', dur: '7:40', soc: '96 → 5 %', eco: 'глубокий', hib: 'да, 05:41' },
+        { start: '09.10 14:02', dur: '0:46', soc: '100 → 88 %', eco: 'да', hib: '—' },
+      ],
+      events: [
+        { time: '19:43', text: 'Eco включён: схема «Bluetti Eco», CPU 80 %, GPU 119 Вт', style: warn },
+        { time: '19:40', text: 'Свет пропал — отключение началось', style: warn },
+        { time: '19:37', text: 'Вход AC 0 Вт, отсчёт до eco 3 мин', style: plain },
+        { time: '15:02', text: 'Станция заряжена до 100 %', style: plain },
+        { time: '09:14', text: 'Станция не отвечала 6 мин (телефон с приложением?)', style: plain },
+        { time: '09:00', text: 'Сервис запущен', style: plain },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>
