@@ -8,3 +8,4 @@
 .vscode/
 Thumbs.db
 *.tmp
+.claude/worktrees/
