@@ -87,6 +87,36 @@ impl MissReason {
     }
 }
 
+/// Уровень eco, который должен быть применён к ПК.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EcoLevel {
+    #[default]
+    None,
+    Eco,
+    Deep,
+}
+
+/// Состояние сети по принятым показаниям (FR-005).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mains {
+    On,
+    Off,
+    #[default]
+    Unknown,
+}
+
+/// Выбор режима на дашборде (FR-015).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ManualMode {
+    #[default]
+    Auto,
+    Eco,
+    Max,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
