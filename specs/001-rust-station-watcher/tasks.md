@@ -93,7 +93,7 @@ description: "Task list for 001-rust-station-watcher"
 - [X] T031 [US4] `src/decision/mod.rs`: `decide(state, input, now, cfg) -> (DecisionState, Vec<Action>)` где `Action` = `Eco(None|Eco|Deep)`, `Notify(kind, text)`, `Hibernate`, `NeedFreshReading`, `Event(kind, text, data)`; `DecisionState` строго по data-model.md, сериализуется в JSON
 - [X] T032 [US4] `src/power/hibernate.rs`: `trait Hibernator`; реализация `SetSuspendState(TRUE, FALSE, FALSE)`; проверка `GetPwrCapabilities().HiberFilePresent` → `hibernateAvailable` в `/api/now` и одно уведомление при старте, если гибернации нет (FR-028a); в `dry_run` — только лог и событие `hibernate` с пометкой
 - [X] T033 [P] [US4] `src/notify.rs`: `trait Notifier`; toast через `tauri-winrt-notification` с AUMID `Reva1v.BluettiWatcher` (до установки ярлыка — AUMID PowerShell как запасной); тексты на русском («ПК уйдёт в гибернацию примерно через N минут», «Заряд 10 % — сохраните работу», «Заряд 20 % — включён глубокий eco»)
-- [ ] T034 [US4] Подключить решения в `src/service.rs`: статус показания из `guards`, запись `DecisionState` в `meta.decision_state` после каждого цикла и загрузка при старте, `NeedFreshReading` → немедленное повторное чтение перед гибернацией, проверка файла `no-hibernate` на каждом цикле, запись `outages` и `events`
+- [X] T034 [US4] Подключить решения в `src/service.rs`: статус показания из `guards`, запись `DecisionState` в `meta.decision_state` после каждого цикла и загрузка при старте, `NeedFreshReading` → немедленное повторное чтение перед гибернацией, проверка файла `no-hibernate` на каждом цикле, запись `outages` и `events`
 
 **Checkpoint**: гибернация и уведомления работают на фейках и в `dry_run`; eco пока только как событие
 
@@ -131,7 +131,7 @@ description: "Task list for 001-rust-station-watcher"
 
 ### Tests for User Story 3
 
-- [ ] T043 [P] [US3] `tests/scenarios.rs`: US3 1–6 — eco через 3 мин без входа AC; снятие через 3 мин с входом; кратковременный провал 1 мин не включает eco; «Максимум» снимает eco до смены сети или «Авто»; 20 % → `Eco(Deep)`; при «Максимум» глубокий eco не включается, уровни и гибернация действуют — решения (US3 1–4, 6) покрыты в tests/scenarios.rs; часть 5 (применение eco на ПК) — T044–T049
+- [X] T043 [P] [US3] `tests/scenarios.rs`: US3 1–6 — eco через 3 мин без входа AC; снятие через 3 мин с входом; кратковременный провал 1 мин не включает eco; «Максимум» снимает eco до смены сети или «Авто»; 20 % → `Eco(Deep)`; при «Максимум» глубокий eco не включается, уровни и гибернация действуют — решения (US3 1–4, 6) покрыты в tests/scenarios.rs; часть 5 (применение eco на ПК) — T044–T049
 - [X] T044 [P] [US3] Unit-тесты `src/power/mod.rs` на фейковом `PowerBackend`: `power_restore` пишется до применения; частичный отказ (нет NVIDIA, ошибка оверлея) не мешает остальным частям и даёт событие `eco-part-failed` (FR-019b); восстановление после перезапуска по сохранённому `power_restore`
 
 ### Implementation for User Story 3
@@ -140,7 +140,7 @@ description: "Task list for 001-rust-station-watcher"
 - [X] T046 [US3] `src/power/scheme.rs`: создать/найти схему «Bluetti Eco» (`PowerDuplicateScheme` от «Сбалансированной» `381b4222-…` при `efficiency_overlay`, иначе от «Экономии энергии» `a1841308-…`; `PowerWriteFriendlyName`), GUID в `meta.eco_scheme`; применить уровень: `PROCTHROTTLEMAX` AC = `cpu_max_pct` / `deep_cpu_max_pct`, `VIDEOIDLE` AC = `monitor_off_sec`, `PowerSetActiveScheme`, оверлей; снять: вернуть `prev_scheme` и оверлей; схему «Экономия (нет света)» `b1e771e0-…` и другие схемы владельца не менять
 - [X] T047 [US3] `src/power/gpu.rs`: сервис пишет `normal|eco|deep` в `%ProgramData%\bluetti-watcher\gpu-request` и запускает задачу `BluettiWatcherGpu` (Task Scheduler COM `ITaskService::GetFolder/GetTask/Run`); нет задачи → часть пропускается с событием; команда `gpu-apply`: NVML (`nvml-wrapper`), ватты = `normal` → default, `eco` → `max(min, default × gpu_pct/100)`, `deep` → `deep_gpu_pct = 0 ? min : max(min, default × pct)`, всегда в `[min_limit, default_limit]`; нет NVIDIA → exit 2
 - [X] T048 [US3] `src/power/mod.rs`: `trait PowerControl { apply(EcoLevel) -> PartResults }`, порядок: сохранить `power_restore` → схема → оверлей → GPU; бэкофф ошибок общий с T030; `dry_run` → только лог
-- [ ] T049 [US3] Подключить `Action::Eco` в `src/service.rs`, события `eco-on`, `eco-deep`, `eco-off`, `eco-part-failed`; при старте сервиса — если `power_restore` есть, а отключения нет, вернуть настройки (восстановление после сбоя)
+- [X] T049 [US3] Подключить `Action::Eco` в `src/service.rs`, события `eco-on`, `eco-deep`, `eco-off`, `eco-part-failed`; при старте сервиса — если `power_restore` есть, а отключения нет, вернуть настройки (восстановление после сбоя)
 
 **Checkpoint**: все четыре истории работают
 

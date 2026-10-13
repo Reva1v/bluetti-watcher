@@ -83,6 +83,11 @@ fn main() -> ExitCode {
             logging::init(None, true, trace);
             block_on(cmd_read_once(&paths, mac, trace))
         }
+        Command::GpuApply => {
+            let _ = paths.ensure();
+            logging::init(Some(&paths.logs_dir()), has_console, false);
+            cmd_gpu_apply(&paths)
+        }
         _ => {
             logging::init(None, true, false);
             eprintln!("команда ещё не реализована");
@@ -106,7 +111,7 @@ fn cmd_open(paths: &paths::Paths) -> ExitCode {
 }
 
 fn block_on<F: std::future::Future<Output = ExitCode>>(f: F) -> ExitCode {
-    match tokio::runtime::Builder::new_current_thread().enable_time().build() {
+    match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(rt) => rt.block_on(f),
         Err(e) => {
             eprintln!("не удалось запустить рантайм: {e}");
@@ -139,11 +144,60 @@ async fn cmd_run(paths: &paths::Paths, dry_run: bool) -> ExitCode {
         cfg.poll_sec,
         if cfg.dry_run { ", dry run" } else { "" }
     );
-    let reader = bluetti_watcher::service::WinRtReader::new(cfg.mac);
-    let mut svc =
-        bluetti_watcher::service::Service::new(cfg, store, reader, bluetti_watcher::clock::SystemClock);
+    use bluetti_watcher::{http, notify, power, service};
+    let (now_tx, now_rx) = tokio::sync::watch::channel(http::NowView::default());
+    let (health_tx, health_rx) = tokio::sync::watch::channel(http::HealthView::default());
+    let (events_tx, _) = tokio::sync::broadcast::channel(64);
+    let (mode_tx, mode_rx) = tokio::sync::mpsc::unbounded_channel();
+    let app = http::AppState {
+        port: cfg.port,
+        db_path: paths.db(),
+        now: now_rx,
+        events: events_tx.clone(),
+        mode_tx,
+        health: health_rx,
+    };
+    let port = cfg.port;
+    tokio::spawn(async move {
+        if let Err(e) = http::serve(app).await {
+            tracing::error!("HTTP на 127.0.0.1:{port} не запущен: {e}");
+        }
+    });
+    let eco_scheme = store.get_meta::<String>("eco_scheme");
+    let power =
+        power::PowerControl::new(power::scheme::WindowsPower, cfg.eco.clone(), eco_scheme, cfg.dry_run);
+    let hibernator = Box::new(power::hibernate::WindowsHibernator { dry_run: cfg.dry_run });
+    let installed = paths.bin_dir().join("bluetti-watcher.exe").exists();
+    let notifier = Box::new(notify::ToastNotifier::new(installed));
+    let channels = service::Channels { now: now_tx, health: health_tx, events: events_tx, modes: mode_rx };
+    let reader = service::WinRtReader::new(cfg.mac);
+    let mut svc = service::Service::new(
+        cfg,
+        store,
+        reader,
+        bluetti_watcher::clock::SystemClock,
+        power,
+        hibernator,
+        notifier,
+        paths.kill_switch(),
+        channels,
+    );
     svc.run().await;
     ExitCode::SUCCESS
+}
+
+fn cmd_gpu_apply(paths: &paths::Paths) -> ExitCode {
+    let cfg = config::load(&paths.config()).config;
+    match bluetti_watcher::power::gpu::apply_from_request(&cfg.eco) {
+        Ok(w) => {
+            tracing::info!("лимит GPU {w} Вт");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            tracing::error!("gpu-apply: {e}");
+            ExitCode::from(e.exit_code() as u8)
+        }
+    }
 }
 
 async fn cmd_scan() -> ExitCode {
