@@ -49,6 +49,12 @@ pub struct NowView {
     pub manual: ManualMode,
     pub hours_left: Option<f64>,
     pub runtime_source: Option<Source>,
+    /// Средняя нагрузка, по которой считается время: с начала отключения или за всю историю.
+    pub avg_load_w: Option<u32>,
+    /// `outage` | `history`.
+    pub avg_load_scope: Option<&'static str>,
+    /// «Если свет пропадёт»: часы по ёмкости при средней нагрузке за всю историю (на сети).
+    pub hours_if_outage: Option<f64>,
     pub levels: LevelsView,
     pub hibernate_delayed_until: Option<String>,
     pub hibernate_available: bool,
@@ -535,6 +541,9 @@ mod tests {
             "manual",
             "hoursLeft",
             "runtimeSource",
+            "avgLoadW",
+            "avgLoadScope",
+            "hoursIfOutage",
             "levels",
             "hibernateDelayedUntil",
             "hibernateAvailable",

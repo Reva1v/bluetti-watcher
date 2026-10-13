@@ -295,6 +295,17 @@ impl Store {
         st.query_map([from, to], row_to_reading)?.collect()
     }
 
+    /// Средняя нагрузка (выход AC + DC, Вт) по принятым показаниям с нагрузкой за `[from, to]` и их число.
+    pub fn avg_load(&self, from: Ts, to: Ts) -> rusqlite::Result<Option<(f64, i64)>> {
+        let (avg, n): (Option<f64>, i64) = self.db.query_row(
+            "SELECT AVG(COALESCE(ac_out_w, 0) + COALESCE(dc_out_w, 0)), COUNT(*) FROM readings
+             WHERE status = 'accepted' AND ts BETWEEN ?1 AND ?2 AND COALESCE(ac_out_w, 0) + COALESCE(dc_out_w, 0) > 0",
+            [from, to],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok(avg.map(|a| (a, n)))
+    }
+
     /// Доля циклов с принятым показанием за `[from, to]` (SC-001); `None` при < 10 циклах.
     pub fn read_ok_ratio(&self, from: Ts, to: Ts) -> rusqlite::Result<Option<f64>> {
         let (all, ok): (i64, i64) = self.db.query_row(

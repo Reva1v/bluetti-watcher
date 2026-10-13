@@ -114,21 +114,33 @@ pub fn estimate(
     learned_efficiency: Option<f64>,
     target_soc: u8,
 ) -> Option<Estimate> {
+    estimate_with_load(recent, now, cfg, learned_efficiency, target_soc, None)
+}
+
+/// То же, но формула по ёмкости берёт `avg_load` (средняя нагрузка, например с начала отключения) вместо
+/// мгновенной: мгновенная скачет каждую минуту, и время скакало вместе с ней. Скорость разряда — как есть,
+/// без пересчёта на текущую нагрузку.
+pub fn estimate_with_load(
+    recent: &[Reading],
+    now: Ts,
+    cfg: &Config,
+    learned_efficiency: Option<f64>,
+    target_soc: u8,
+    avg_load: Option<f64>,
+) -> Option<Estimate> {
     let cur = recent.iter().rev().find(|r| r.ts <= now)?;
     let soc = f64::from(cur.soc?);
     if cur.ac_in_w.unwrap_or(0) > 0 {
         return None;
     }
-    let load = f64::from(cur.load_w()?);
+    let load = avg_load.filter(|l| *l > 0.0).unwrap_or(f64::from(cur.load_w()?));
     if load <= 0.0 {
         return None;
     }
     let left = (soc - f64::from(target_soc)).max(0.0);
     if let Some(m) = measure(recent, now, cfg) {
-        // Нагрузка выросла сейчас — время сокращается сейчас.
-        let scale = if m.mean_load > 0.0 { m.mean_load / load } else { 1.0 };
         return Some(Estimate {
-            hours: cap(left / m.rate * scale)?,
+            hours: cap(left / m.rate)?,
             source: Source::Rate,
             rate_per_hour: Some(round(m.rate, 1)),
         });
@@ -140,6 +152,15 @@ pub fn estimate(
         source: if sound.is_some() { Source::Learned } else { Source::Capacity },
         rate_per_hour: None,
     })
+}
+
+/// «Если свет пропадёт»: часы до пустой по ёмкости при средней нагрузке (обученный КПД, если он правдоподобен).
+pub fn if_outage(soc: u8, avg_load: f64, cfg: &Config, learned_efficiency: Option<f64>) -> Option<f64> {
+    if avg_load <= 0.0 {
+        return None;
+    }
+    let eff = sound(learned_efficiency, cfg).unwrap_or(cfg.station.efficiency);
+    cap(cfg.station.capacity_wh * f64::from(soc) / 100.0 * eff / avg_load)
 }
 
 /// Новый обученный КПД и время обучения: по чистому окну — средняя нагрузка / (скорость × ёмкость). Первое
@@ -238,6 +259,16 @@ mod tests {
     }
 
     #[test]
+    fn average_load_steadies_the_estimate() {
+        let cfg = Config::default();
+        // Мгновенная нагрузка 400 Вт, средняя 200 — время по средней.
+        let e = estimate_with_load(&[r(0, 50, 0, 400)], 0, &cfg, None, 0, Some(200.0)).unwrap();
+        assert_eq!(e.hours, 3.1);
+        assert_eq!(if_outage(100, 170.0, &cfg, None), Some(7.2));
+        assert_eq!(if_outage(100, 0.0, &cfg, None), None);
+    }
+
+    #[test]
     fn mains_or_no_load_gives_none() {
         let cfg = Config::default();
         assert_eq!(estimate(&[r(0, 50, 300, 200)], 0, &cfg, None, 0), None);
@@ -304,12 +335,15 @@ mod tests {
     }
 
     #[test]
-    fn higher_load_now_shortens_rate_estimate() {
+    fn momentary_load_spike_does_not_move_rate_estimate() {
         let cfg = Config::default();
-        let mut v = series(&[(0, 54), (1, 53), (31, 49), (32, 49)], 200);
-        v.last_mut().unwrap().ac_out_w = Some(400);
-        let e = estimate(&v, 32 * MIN, &cfg, None, 0).unwrap();
-        assert_eq!(e.hours, 3.1);
+        let steady = series(&[(0, 54), (1, 53), (31, 49), (32, 49)], 200);
+        let mut spike = steady.clone();
+        spike.last_mut().unwrap().ac_out_w = Some(400);
+        let a = estimate(&steady, 32 * MIN, &cfg, None, 0).unwrap();
+        let b = estimate(&spike, 32 * MIN, &cfg, None, 0).unwrap();
+        assert_eq!((a.source, b.source), (Source::Rate, Source::Rate));
+        assert_eq!(a.hours, b.hours);
     }
 
     #[test]

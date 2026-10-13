@@ -175,14 +175,23 @@
     const onMains = n.mains === 'on';
     setText('tl-title', onMains ? 'Если свет пропадёт' : 'Осталось');
     let big = '—', unit = '', sub = '', m1 = '', m2 = '', cls = 'tl live';
+    const avg = n.avgLoadW;
+    const avgText = avg != null
+      ? 'при средней нагрузке ' + avg + ' Вт' + (n.avgLoadScope === 'outage' ? ' с начала отключения' : ' за всё время')
+      : '';
     if (n.hoursLeft != null) {
       [big, unit] = hoursParts(n.hoursLeft);
-      if (load != null) sub = 'при нагрузке ' + load + ' Вт';
+      sub = avgText || (load != null ? 'при нагрузке ' + load + ' Вт' : '');
       m1 = SRC[n.runtimeSource] || '';
       if (soc != null && soc > HIBERNATE_SOC && !onMains) {
         const at = new Date(nowMs + (n.hoursLeft * (soc - HIBERNATE_SOC)) / soc * 3600e3);
         m2 = 'Гибернация на ' + HIBERNATE_SOC + ' % — примерно в ' + hm(at);
       }
+    } else if (onMains && n.hoursIfOutage != null) {
+      [big, unit] = hoursParts(n.hoursIfOutage);
+      big = '≈ ' + big; cls += ' est';
+      sub = avgText + ', по ёмкости ' + CAPACITY_WH + ' Вт·ч';
+      if (load != null) m1 = 'Сейчас ' + load + ' Вт';
     } else if (load === 0) {
       big = 'нет нагрузки'; cls += ' small';
     } else if (onMains && soc != null && load > 0) {

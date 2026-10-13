@@ -341,7 +341,19 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
     pub fn now_view(&self, now: Ts) -> NowView {
         let v = decision::view(&self.state, now, &self.cfg);
         let last = self.state.last_accepted.clone().or_else(|| self.store.last_accepted().ok().flatten());
-        let estimate = crate::runtime::estimate(&self.recent(now), now, &self.cfg, self.learned, 0);
+        // Средняя нагрузка вместо мгновенной: в отключении — с его начала, иначе — за всю историю.
+        let outage_start = self.state.outage.as_ref().map(|o| o.start_ts);
+        let (avg_from, scope) = match outage_start {
+            Some(t) => (t, "outage"),
+            None => (0, "history"),
+        };
+        let avg = self.store.avg_load(avg_from, now).ok().flatten().map(|(a, _)| a);
+        let estimate =
+            crate::runtime::estimate_with_load(&self.recent(now), now, &self.cfg, self.learned, 0, avg);
+        let hours_if_outage = match (outage_start, last.as_ref().and_then(|r| r.soc), avg) {
+            (None, Some(soc), Some(a)) => crate::runtime::if_outage(soc, a, &self.cfg, self.learned),
+            _ => None,
+        };
         let iso = |t: Option<Ts>| t.map(to_local_iso);
         NowView {
             ts: iso(last.as_ref().map(|r| r.ts)),
@@ -362,6 +374,9 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
             manual: v.manual,
             hours_left: estimate.as_ref().map(|e| e.hours),
             runtime_source: estimate.map(|e| e.source),
+            avg_load_w: avg.map(|a| a.round() as u32),
+            avg_load_scope: avg.map(|_| scope),
+            hours_if_outage,
             levels: LevelsView { low: v.level_low, critical: v.level_critical, warn: v.level_warn },
             hibernate_delayed_until: iso(v.hibernate_delayed_until),
             hibernate_available: self.hibernator.available(),
