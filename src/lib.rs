@@ -7,6 +7,7 @@ pub mod ble;
 pub mod clock;
 pub mod config;
 pub mod console;
+pub mod decision;
 pub mod http;
 pub mod instance;
 pub mod logging;
