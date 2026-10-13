@@ -8,6 +8,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+// The long form of TEMP: CI runners hand an 8.3 short path (RUNNER~1) that PowerShell prints long.
+const TMP = fs.realpathSync.native(os.tmpdir());
 
 const HOOK = path.join(__dirname, 'power-mode.js');
 const RULES = fs.readFileSync(path.join(__dirname, 'power-mode.rules.md'), 'utf8').replace(/\r\n/g, '\n').trim();
@@ -20,7 +22,7 @@ delete process.env.POWER_MODE_FILE;
 
 // A private world: its own TEMP (state files) and its own flag file.
 function world(t, hook = HOOK) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'power-mode-test-'));
+  const dir = fs.mkdtempSync(path.join(TMP, 'power-mode-test-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const flag = path.join(dir, 'flag', 'power-mode.json');
   const temp = path.join(dir, 'temp');
@@ -357,7 +359,7 @@ test('SubagentStart: emergency -> header + rules as context only; normal -> noth
 
 // ---- the rules file, the time, the size
 test('a missing rules file leaves the header alone, on every event', (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'power-mode-norules-'));
+  const dir = fs.mkdtempSync(path.join(TMP, 'power-mode-norules-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const copy = path.join(dir, 'power-mode.js');
   fs.copyFileSync(HOOK, copy);
@@ -369,7 +371,7 @@ test('a missing rules file leaves the header alone, on every event', (t) => {
 });
 
 test('the rules file is read at run time, CRLF and a BOM tolerated', (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'power-mode-rules-'));
+  const dir = fs.mkdtempSync(path.join(TMP, 'power-mode-rules-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const copy = path.join(dir, 'power-mode.js');
   fs.copyFileSync(HOOK, copy);
@@ -562,14 +564,14 @@ test('a malformed battery is no battery; an eco with no end time that the statio
 // With no POWER_MODE_FILE the flag is %ProgramData%\BluettiWatcher\power-mode.json; the hook writes no flag. A junction
 // or link in its place, or a folder that cannot be listed, is unreadable - for a POWER_MODE_FILE path too.
 function defaultWorld(t) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'power-mode-test-'));
+  const dir = fs.mkdtempSync(path.join(TMP, 'power-mode-test-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const pd = path.join(dir, 'pd');
   const temp = path.join(dir, 'temp');
   for (const d of [path.join(pd, 'BluettiWatcher'), temp]) fs.mkdirSync(d, { recursive: true });
   const fresh = path.join(pd, 'BluettiWatcher', 'power-mode.json');
   const fire = (sid, flagEnv) => {
-    const env = { ...process.env, TEMP: temp, TMP: temp };
+    const env = { ...process.env, TEMP: temp, TMP: temp, TZ: 'Europe/Kyiv' };
     for (const k of Object.keys(env)) if (/^(POWER_MODE_FILE|PROGRAMDATA|ALLUSERSPROFILE)$/i.test(k)) delete env[k];
     env.ProgramData = pd;
     if (flagEnv) env.POWER_MODE_FILE = flagEnv;

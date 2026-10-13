@@ -10,6 +10,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
+// The long form of TEMP: CI runners hand an 8.3 short path (RUNNER~1) that PowerShell prints long.
+const TMP = fs.realpathSync.native(os.tmpdir());
 
 const CLI = path.join(__dirname, 'power-mode.ps1');
 // The live names come from the environment: a runner's own values never reach a test that does not set them.
@@ -21,7 +23,7 @@ const PIN_TZ = 'Europe/Kyiv,FLE Standard Time';
 const EMERGENCY_RE = /^power mode: EMERGENCY since \d{2}\.\d{2}\.\d{4} \d{2}:\d{2}$/;
 
 function world(t) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'power-mode-cli-'));
+  const dir = fs.mkdtempSync(path.join(TMP, 'power-mode-cli-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   return { dir, flag: path.join(dir, 'power-mode.json') };
 }
@@ -311,7 +313,7 @@ const FAKE_SCHTASKS = [
 // power-mode.config.json - returnPlan balanced unless given (the tool's own default is High performance), null = no file.
 function machine(t, { plans = [BALANCED, SAVER], active = BALANCED, gpu = null, config = { returnPlan: 'balanced' } } = {}) {
   const w = world(t);
-  const sim = fs.mkdtempSync(path.join(os.tmpdir(), 'power-mode-sim-'));
+  const sim = fs.mkdtempSync(path.join(TMP, 'power-mode-sim-'));
   t.after(() => fs.rmSync(sim, { recursive: true, force: true }));
   fs.writeFileSync(path.join(sim, 'plans.txt'), plans.join('\n') + '\n');
   fs.writeFileSync(path.join(sim, 'active.txt'), active);
@@ -1245,7 +1247,7 @@ test('install registers from the XML text, never through a file; under a test it
   const install = src.slice(src.indexOf("if ($Action -ceq 'gpu-task')"), src.indexOf("if ($Action -ceq 'end')"));
   assert.match(install, /Invoke-RealTool 'schtasks\.exe' @\('\/delete', '\/tn', \$name, '\/f'\)\s*\n\s*\$r = Register-GpuTask \$name \(New-GpuTaskXml \$name \$watts\)/); // a squatted name goes first
   assert.doesNotMatch(install, /WriteAllText|GetTempPath|\/xml', \$|'\/create'/);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'power-mode-lib-'));
+  const dir = fs.mkdtempSync(path.join(TMP, 'power-mode-lib-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const file = path.join(dir, 'probe.ps1');
   fs.writeFileSync(file, `. '${path.join(__dirname, 'power-mode-flag.ps1')}'\nRegister-GpuTask 'BluettiWatcherEcoGpuTestNever' (New-GpuTaskXml 'BluettiWatcherEcoGpuTestNever' 100)\n'not stopped'\n`);
@@ -1313,7 +1315,7 @@ test('a tool that hangs is killed after POWER_MODE_TOOL_TIMEOUT_MS: a note, exit
 
 // The library functions, dot-sourced in pwsh: what install registers, and how a registered task is recognised.
 function lib(t, code) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'power-mode-lib-'));
+  const dir = fs.mkdtempSync(path.join(TMP, 'power-mode-lib-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const file = path.join(dir, 'probe.ps1');
   fs.writeFileSync(file, `. '${path.join(__dirname, 'power-mode-flag.ps1')}'\n${code}\n`);
@@ -1383,7 +1385,7 @@ test('gpu-task status lists both tasks with their wattage and the live limit: 0 
 const LIB = path.join(__dirname, 'power-mode-flag.ps1');
 function flagLib(t, body, seams = true, extraEnv = {}) {
   // Its own world: the ACL cases leave folders the test user cannot delete until their ACL is reset.
-  const w = { dir: fs.mkdtempSync(path.join(os.tmpdir(), 'power-mode-cli-')) };
+  const w = { dir: fs.mkdtempSync(path.join(TMP, 'power-mode-cli-')) };
   t.after(() => {
     spawnSync('icacls', [w.dir, '/reset', '/T', '/Q'], { windowsHide: true });
     fs.rmSync(w.dir, { recursive: true, force: true });
