@@ -5,10 +5,12 @@
   const MONO = "'JetBrains Mono', 'Cascadia Mono', Consolas, monospace";
   const C = { green: '#3DD68C', yellow: '#F5C518', red: '#FF4D4D', blue: '#5AA9FF', orange: '#FF6F1A', muted: '#8E9AA3' };
   const RANGES = { '6h': [21600, '6 часов'], '24h': [86400, '24 часа'], '7d': [604800, '7 дней'], '30d': [2592000, '30 дней'] };
-  const SRC = { rate: 'По скорости разряда', learned: 'По обученному КПД', capacity: 'По ёмкости 1440 Вт·ч' };
-  const CAPACITY_WH = 1440;
-  const EFFICIENCY = 0.85;
-  const HIBERNATE_SOC = 5;
+  // Значения по умолчанию до первого ответа; дальше — из `station` в /api/now.
+  let CAPACITY_WH = 1440;
+  let EFFICIENCY = 0.85;
+  let HIBERNATE_SOC = 5;
+  let LOW_SOC = 20;
+  const SRC = { rate: 'По скорости разряда', learned: 'По обученному КПД', capacity: 'По ёмкости станции' };
 
   const S = {
     now: null, outages: [], events: [], range: '6h', hist: null, histAt: 0, xr: [0, 1],
@@ -46,7 +48,7 @@
     const min = Math.round(h * 60), hh = Math.floor(min / 60);
     return hh ? [hh + ' ч ' + pad(min % 60), 'мин'] : [String(min), 'мин'];
   }
-  const socColor = (s) => (s >= 50 ? C.green : s >= 20 ? C.yellow : C.red);
+  const socColor = (s) => (s >= 50 ? C.green : s >= LOW_SOC ? C.yellow : C.red);
   const fmtW = (v) => (v == null ? '—' : String(Math.round(v)));
   const sum = (a, b) => (a == null && b == null ? null : (a || 0) + (b || 0));
 
@@ -66,6 +68,13 @@
     show('b-conn', !S.conn);
     const dot = $('st-dot');
     if (!n) { dot.className = 'dot'; return; }
+    if (n.station) {
+      CAPACITY_WH = n.station.capacityWh;
+      EFFICIENCY = n.station.efficiency;
+      HIBERNATE_SOC = n.station.hibernate;
+      LOW_SOC = n.station.low;
+      setText('st-sub', 'AC180P' + (n.station.mac ? ' · ' + n.station.mac : ''));
+    }
     const nowMs = Date.now();
     document.body.classList.toggle('is-stale', n.stale);
     show('dry', n.dryRun);
@@ -208,7 +217,7 @@
       detail = 'Заряд низкий: максимальная экономия до возвращения света.';
     } else if (n.eco === 'eco') {
       title = 'Eco включён автоматически';
-      detail = 'Схема «Bluetti Eco»: CPU и GPU ограничены, монитор гаснет раньше. На 20 % включится глубокий eco.';
+      detail = 'Схема «Bluetti Eco»: CPU и GPU ограничены, монитор гаснет раньше. На ' + LOW_SOC + ' % включится глубокий eco.';
     } else if (n.ecoAt) {
       const left = Math.max(0, Math.round((new Date(n.ecoAt) - nowMs) / 1000));
       title = 'Eco через ' + Math.floor(left / 60) + ':' + pad(left % 60);
@@ -314,7 +323,7 @@
     ctx.strokeStyle = '#5C2A24';
     ctx.lineWidth = px;
     ctx.setLineDash([4 * px, 4 * px]);
-    for (const v of [20, HIBERNATE_SOC]) {
+    for (const v of [LOW_SOC, HIBERNATE_SOC]) {
       const y = Math.round(u.valToPos(v, 'y', true)) + 0.5;
       ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(left + width, y); ctx.stroke();
     }

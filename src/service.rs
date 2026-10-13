@@ -9,7 +9,7 @@ use crate::ble::{ReadOptions, ReadOutcome};
 use crate::clock::{Clock, MIN, Ts, to_local_iso};
 use crate::config::Config;
 use crate::decision::{self, Action, DecisionState, Input};
-use crate::http::{ErrorView, HealthView, LevelsView, NowView, OutageView};
+use crate::http::{ErrorView, HealthView, LevelsView, NowView, OutageView, StationView};
 use crate::model::{EcoLevel, ManualMode, MissReason, ReadStatus, Reading};
 use crate::notify::Notifier;
 use crate::power::hibernate::Hibernator;
@@ -358,6 +358,15 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
                 .last_error
                 .as_ref()
                 .map(|(t, text)| ErrorView { ts: to_local_iso(*t), text: text.clone() }),
+            station: StationView {
+                mac: self.cfg.mac.map(crate::config::format_mac),
+                capacity_wh: self.cfg.station.capacity_wh,
+                efficiency: self.learned.unwrap_or(self.cfg.station.efficiency),
+                low: self.cfg.levels.low,
+                critical: self.cfg.levels.critical,
+                warn: self.cfg.levels.warn,
+                hibernate: self.cfg.levels.hibernate,
+            },
         }
     }
 

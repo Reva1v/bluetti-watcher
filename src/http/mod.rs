@@ -54,6 +54,20 @@ pub struct NowView {
     pub kill_switch: bool,
     pub dry_run: bool,
     pub last_error: Option<ErrorView>,
+    pub station: StationView,
+}
+
+/// Постоянные данные станции и порогов из конфига — чтобы страница ничего не зашивала.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StationView {
+    pub mac: Option<String>,
+    pub capacity_wh: f64,
+    pub efficiency: f64,
+    pub low: u8,
+    pub critical: u8,
+    pub warn: u8,
+    pub hibernate: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -494,6 +508,7 @@ mod tests {
             "killSwitch",
             "dryRun",
             "lastError",
+            "station",
         ];
         want.sort_unstable();
         let mut got = keys.clone();

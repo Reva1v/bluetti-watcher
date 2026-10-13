@@ -26,7 +26,8 @@
   "hibernateAvailable": true,
   "killSwitch": false,
   "dryRun": false,
-  "lastError": null
+  "lastError": null,
+  "station": { "mac": "AA:BB:CC:DD:EE:FF", "capacityWh": 1440, "efficiency": 0.85, "low": 20, "critical": 10, "warn": 7, "hibernate": 5 }
 }
 ```
 
@@ -34,6 +35,8 @@
 - `mains`: `on` / `off` / `unknown`. `eco`: `none` / `eco` / `deep`. `manual`: `auto` / `eco` / `max`.
 - `ecoAt`: когда включится eco, если сеть не вернётся (только пока сеть пропала, а отключение ещё не началось).
 - `runtimeSource`: `rate` / `learned` / `capacity` / null; `hoursLeft` null при нагрузке 0 или на сети.
+- `station`: постоянные данные из конфига (адрес, ёмкость, КПД — обученный, если есть; пороги), чтобы страница ничего
+  не зашивала.
 - `lastError`: `{ "ts", "text" }` последней ошибки чтения или действия, null если всё в порядке.
 
 ## GET /api/history?range=6h|24h|7d|30d
