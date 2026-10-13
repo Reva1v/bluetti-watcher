@@ -81,16 +81,16 @@ description: "Task list for 001-rust-station-watcher"
 
 ### Tests for User Story 4
 
-- [ ] T025 [P] [US4] `tests/scenarios.rs`: сценарии spec.md US4 1–6 на фейковых часах и показаниях: предупреждение на 7 % после двух показаний ≥ 90 с; гибернация на 5 % не раньше 3 мин после предупреждения и только после свежего подтверждения; нет свежего показания → нет гибернации; `no-hibernate` → событие `hibernate-refused`; скачок 60 % → 3 % отвергнут, при удержании — 10 мин подтверждения после rebase; повтор после пробуждения
-- [ ] T026 [P] [US4] `tests/scenarios.rs`: края из spec.md Edge Cases: неполное показание не участвует; пропуск > 600 с сбрасывает состояние; перевод часов назад сбрасывает, вперёд засчитывается одним интервалом (не больше 2×poll); вход DC при нулевом входе AC = работа от батареи
-- [ ] T027 [P] [US4] Unit-тесты `src/decision/guards.rs`: правдоподобие `|Δsoc| ≤ max(3, 5 × минуты)`; три согласных отвергнутых → rebase, rebase не считается в уровни и таймеры
+- [X] T025 [P] [US4] `tests/scenarios.rs`: сценарии spec.md US4 1–6 на фейковых часах и показаниях: предупреждение на 7 % после двух показаний ≥ 90 с; гибернация на 5 % не раньше 3 мин после предупреждения и только после свежего подтверждения; нет свежего показания → нет гибернации; `no-hibernate` → событие `hibernate-refused`; скачок 60 % → 3 % отвергнут, при удержании — 10 мин подтверждения после rebase; повтор после пробуждения
+- [X] T026 [P] [US4] `tests/scenarios.rs`: края из spec.md Edge Cases: неполное показание не участвует; пропуск > 600 с сбрасывает состояние; перевод часов назад сбрасывает, вперёд засчитывается одним интервалом (не больше 2×poll); вход DC при нулевом входе AC = работа от батареи
+- [X] T027 [P] [US4] Unit-тесты `src/decision/guards.rs`: правдоподобие `|Δsoc| ≤ max(3, 5 × минуты)`; три согласных отвергнутых → rebase, rebase не считается в уровни и таймеры
 
 ### Implementation for User Story 4
 
-- [ ] T028 [US4] `src/decision/guards.rs`: полнота (`soc` и `ac_in_w` есть), правдоподобие, rebase (FR-004, FR-006), сброс по пропуску > `max_gap_sec`, обработка скачков часов
-- [ ] T029 [US4] `src/decision/mains.rs`: `mains = On если ac_in_w > 0, Off если = 0` (FR-005); таймеры `lost_sec`/`back_sec` только по принятым показаниям (FR-018); начало/конец отключения; ручной режим `Auto|Eco|Max` сбрасывается в `Auto` при подтверждённой смене сети (FR-015); `eco_at` для отсчёта (FR-021). Действия eco на этом этапе только как `Action::Eco(Level)` без исполнения
-- [ ] T030 [US4] `src/decision/levels.rs`: уровни `low/critical/warn/hibernate` (по умолчанию 20/10/7/5), согласие двух принятых показаний ≥ `agree_sec`, один уровень за цикл, срабатывание засчитывается только после успешного действия, повтор с бэкоффом 1, 2, 4, 8, затем каждые 10 мин (FR-022–FR-027)
-- [ ] T031 [US4] `src/decision/mod.rs`: `decide(state, input, now, cfg) -> (DecisionState, Vec<Action>)` где `Action` = `Eco(None|Eco|Deep)`, `Notify(kind, text)`, `Hibernate`, `NeedFreshReading`, `Event(kind, text, data)`; `DecisionState` строго по data-model.md, сериализуется в JSON
+- [X] T028 [US4] `src/decision/guards.rs`: полнота (`soc` и `ac_in_w` есть), правдоподобие, rebase (FR-004, FR-006), сброс по пропуску > `max_gap_sec`, обработка скачков часов
+- [X] T029 [US4] `src/decision/mains.rs`: `mains = On если ac_in_w > 0, Off если = 0` (FR-005); таймеры `lost_sec`/`back_sec` только по принятым показаниям (FR-018); начало/конец отключения; ручной режим `Auto|Eco|Max` сбрасывается в `Auto` при подтверждённой смене сети (FR-015); `eco_at` для отсчёта (FR-021). Действия eco на этом этапе только как `Action::Eco(Level)` без исполнения
+- [X] T030 [US4] `src/decision/levels.rs`: уровни `low/critical/warn/hibernate` (по умолчанию 20/10/7/5), согласие двух принятых показаний ≥ `agree_sec`, один уровень за цикл, срабатывание засчитывается только после успешного действия, повтор с бэкоффом 1, 2, 4, 8, затем каждые 10 мин (FR-022–FR-027)
+- [X] T031 [US4] `src/decision/mod.rs`: `decide(state, input, now, cfg) -> (DecisionState, Vec<Action>)` где `Action` = `Eco(None|Eco|Deep)`, `Notify(kind, text)`, `Hibernate`, `NeedFreshReading`, `Event(kind, text, data)`; `DecisionState` строго по data-model.md, сериализуется в JSON
 - [ ] T032 [US4] `src/power/hibernate.rs`: `trait Hibernator`; реализация `SetSuspendState(TRUE, FALSE, FALSE)`; проверка `GetPwrCapabilities().HiberFilePresent` → `hibernateAvailable` в `/api/now` и одно уведомление при старте, если гибернации нет (FR-028a); в `dry_run` — только лог и событие `hibernate` с пометкой
 - [ ] T033 [P] [US4] `src/notify.rs`: `trait Notifier`; toast через `tauri-winrt-notification` с AUMID `Reva1v.BluettiWatcher` (до установки ярлыка — AUMID PowerShell как запасной); тексты на русском («ПК уйдёт в гибернацию примерно через N минут», «Заряд 10 % — сохраните работу», «Заряд 20 % — включён глубокий eco»)
 - [ ] T034 [US4] Подключить решения в `src/service.rs`: статус показания из `guards`, запись `DecisionState` в `meta.decision_state` после каждого цикла и загрузка при старте, `NeedFreshReading` → немедленное повторное чтение перед гибернацией, проверка файла `no-hibernate` на каждом цикле, запись `outages` и `events`
@@ -131,7 +131,7 @@ description: "Task list for 001-rust-station-watcher"
 
 ### Tests for User Story 3
 
-- [ ] T043 [P] [US3] `tests/scenarios.rs`: US3 1–6 — eco через 3 мин без входа AC; снятие через 3 мин с входом; кратковременный провал 1 мин не включает eco; «Максимум» снимает eco до смены сети или «Авто»; 20 % → `Eco(Deep)`; при «Максимум» глубокий eco не включается, уровни и гибернация действуют
+- [ ] T043 [P] [US3] `tests/scenarios.rs`: US3 1–6 — eco через 3 мин без входа AC; снятие через 3 мин с входом; кратковременный провал 1 мин не включает eco; «Максимум» снимает eco до смены сети или «Авто»; 20 % → `Eco(Deep)`; при «Максимум» глубокий eco не включается, уровни и гибернация действуют _(решающая часть готова: US3 1–4, 6 в `tests/scenarios.rs` на `decide`; п. 5 — применение eco на ПК — за T044–T049)_
 - [ ] T044 [P] [US3] Unit-тесты `src/power/mod.rs` на фейковом `PowerBackend`: `power_restore` пишется до применения; частичный отказ (нет NVIDIA, ошибка оверлея) не мешает остальным частям и даёт событие `eco-part-failed` (FR-019b); восстановление после перезапуска по сохранённому `power_restore`
 
 ### Implementation for User Story 3
