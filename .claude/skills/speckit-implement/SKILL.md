@@ -154,6 +154,11 @@ You **MUST** consider the user input before proceeding (if not empty).
 
 6. **Dispatch plan** (before each phase, and again whenever a checkpoint unblocks new work): sort the runnable tasks into
    **packets** and decide, per packet, inline or subagent.
+   - **Budget gate first**: read `%LOCALAPPDATA%\claude-limits-observer\snapshot.json` (written by the owner's
+     statusline collector: `{captured_at, five_hour: {used_percentage, resets_at}, …}`, epoch seconds). When
+     `five_hour.used_percentage` ≥ 80, every packet stays inline for this phase: subagents re-read the docs and code
+     a brief points at, so they spend more tokens in total than inline work. Missing file or `captured_at` older than
+     10 minutes: say so in one line and decide as if under 80.
    - A packet goes to a **subagent** when all hold: it owns its files (disjoint from every other packet and from your
      inline work), it implements against an interface you can write down exactly now (signatures, types, file paths),
      and its own tests prove it done. Typical: a pure module with its tests, an adapter behind a trait, an API layer
