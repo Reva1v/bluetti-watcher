@@ -1,0 +1,2 @@
+- The PC hibernates soon. Save now: commit, push what the user lets you push, write the state of anything in flight where the next session finds it.
+- Start nothing. End the turn as soon as the state is written.

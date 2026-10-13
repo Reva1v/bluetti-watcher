@@ -1,0 +1,7 @@
+{"result":true,"data":{
+"1":{"sub_type":"","start_date":"","end_date":"","type":"","sub_type_reason":["GPV4.1","GPV6.2","GPV2.2"],"voluntarily":null,"cek":null},
+"2A":{"sub_type":"","start_date":"","end_date":"","type":"","sub_type_reason":["GPV1.1"],"voluntarily":null,"cek":null},
+"7":{"sub_type":"Emergency repair","start_date":"14:20 07.10.2026","end_date":"18:00 07.10.2026","type":"2","sub_type_reason":["GPV4.1","GPV1.1"],"voluntarily":null,"cek":null},
+"9":{"sub_type":"Emergency repair","start_date":"this afternoon","end_date":"by the evening","type":"2","sub_type_reason":["GPV6.1"],"voluntarily":null,"cek":null},
+"11":{"sub_type":"","start_date":"","end_date":"","type":"","sub_type_reason":[],"voluntarily":null,"cek":null}
+},"showCurOutageParam":true,"showCurSchedule":true,"showTableSchedule":true,"showTablePlan":false,"updateTimestamp":"12:17 07.10.2026"}

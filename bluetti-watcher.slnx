@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/BluettiWatcher/BluettiWatcher.csproj" />
+  <Project Path="tests/BluettiWatcher.Tests/BluettiWatcher.Tests.csproj" />
+</Solution>

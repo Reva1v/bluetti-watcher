@@ -1,0 +1,6 @@
+- Eco mode = save electricity without stopping work. No local models (no local LLM server, no local inference), no GPU or video pipelines until the mode ends (the `until` time above; an eco the Bluetti Watcher set has none and ends when mains is back).
+- No benchmarks: no performance or latency measurements, load tests or comparisons by timing; a measurement a task needs waits until the mode ends. A timing-sensitive check run under the Windows Power saver plan is not evidence either way: note it and re-run later.
+- Everything else runs as usual: builds, test suites, browser checks, subagents. Hosted tools and models come first where they fit.
+- The mode ends by itself at `until`; read the clock before starting long work late in the window.
+- While mains is off the Bluetti Watcher escalates by battery: the emergency rules when the battery is low, then STOP (commit, push, write the state, end the turn), then a warning before the PC hibernates.
+- Why it is on: most likely a power cut; the PC runs from a battery station and can go dark without warning. Commit finished steps at once, push the branches the user lets you push, keep work in commits rather than in a long uncommitted run, and write the state of anything in flight where the next session finds it before a long step.

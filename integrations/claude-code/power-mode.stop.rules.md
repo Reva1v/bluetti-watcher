@@ -1,0 +1,4 @@
+- STOP. The battery station is almost empty and mains is off: the PC can go dark within minutes.
+- Commit every finished step now. Push only the branches the user lets you push without asking; never main or a protected branch unless the user said so.
+- Write the state of anything in flight where the next session finds it (the project's notes or TODO file): what is done, what is half-done, the next step.
+- End the turn. Start nothing new: no build, no test run, no subagent, no deploy.

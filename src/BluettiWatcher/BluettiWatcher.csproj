@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- WinExe: no console window when the logon task starts it. -->
+    <OutputType>WinExe</OutputType>
+    <AssemblyName>BluettiWatcher</AssemblyName>
+    <RootNamespace>BluettiWatcher</RootNamespace>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <PublishAot>true</PublishAot>
+    <IsAotCompatible>true</IsAotCompatible>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+    <OptimizationPreference>Size</OptimizationPreference>
+    <StackTraceSupport>false</StackTraceSupport>
+    <EventSourceSupport>false</EventSourceSupport>
+    <ServerGarbageCollector>false</ServerGarbageCollector>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <TieredPGO>false</TieredPGO>
+    <Version>1.0.0</Version>
+    <!-- LibraryImport (AttachConsole for the cloud login) generates unsafe marshalling code. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Web\station.html" LogicalName="station.html" />
+  </ItemGroup>
+  <!-- The doc-comment file feeds the analyzers at build time; the published folder does not carry it. -->
+  <Target Name="DropDocFileFromPublish" AfterTargets="ComputeResolvedFilesToPublishList">
+    <ItemGroup>
+      <_DocXml Include="@(ResolvedFileToPublish)" Condition="'%(Filename)%(Extension)' == '$(AssemblyName).xml'" />
+      <ResolvedFileToPublish Remove="@(_DocXml)" />
+    </ItemGroup>
+  </Target>
+  <ItemGroup>
+    <InternalsVisibleTo Include="BluettiWatcher.Tests" />
+  </ItemGroup>
+</Project>

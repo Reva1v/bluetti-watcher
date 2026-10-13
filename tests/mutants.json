@@ -1,0 +1,65 @@
+[
+  {
+    "name": "hibernate guard: a fresh reading on mains no longer refuses",
+    "file": "src/BluettiWatcher/Decision/Guards.cs",
+    "from": "if (StationDecision.GridOf(fresh) != Grid.Off) return \"not on battery\";",
+    "to": "if (StationDecision.GridOf(fresh) == Grid.Off && fresh.Soc < 0) return \"not on battery\";"
+  },
+  {
+    "name": "gap reset: a gap past maxGapSec no longer resets the whole state",
+    "file": "src/BluettiWatcher/Decision/StationDecision.cs",
+    "from": "if (s.LastAt is not { } lastAt || (now - lastAt).TotalSeconds > c.MaxGapSec)",
+    "to": "if (s.LastAt is not { } lastAt)"
+  },
+  {
+    "name": "POST guard: a missing X-Station header no longer refuses",
+    "file": "src/BluettiWatcher/Http/RequestGuard.cs",
+    "from": "if (!r.Headers.TryGetValue(\"x-station\", out var x) || !string.Equals(x, \"1\", StringComparison.Ordinal))",
+    "to": "if (!r.Headers.TryGetValue(\"x-station\", out var x) && string.Equals(x, \"1\", StringComparison.Ordinal))"
+  },
+  {
+<<<<<<< HEAD
+    "name": "dtek watcher matcher: a cut of another queue no longer starts the count over",
+    "file": "src/BluettiWatcher/DtekWatcher/DtekMatcher.cs",
+    "from": "int count = m.Candidate == only ? m.Count + 1 : 1;",
+    "to": "int count = m.Count + 1;"
+  },
+  {
+    "name": "dtek watcher read: a challenge page is taken for a good read",
+    "file": "src/BluettiWatcher/DtekWatcher/DtekWatcherService.cs",
+    "from": "string error = Class(answer.Page.Status), detail = answer.Page.Detail;",
+    "to": "string error = answer.Page.Status == DtekStatus.Blocked ? \"\" : Class(answer.Page.Status), detail = answer.Page.Detail;"
+  },
+  {
+    "name": "dtek watcher host: any https host passes",
+    "file": "src/BluettiWatcher/DtekWatcher/DtekHttpSource.cs",
+    "from": "uri.IsDefaultPort && string.Equals(uri.Host, host, StringComparison.OrdinalIgnoreCase);",
+    "to": "uri.IsDefaultPort && (host.Length > 0 || string.Equals(uri.Host, host, StringComparison.OrdinalIgnoreCase));"
+  },
+  {
+    "name": "dtek watcher hint: two contradicting cuts for different queues refute the manual queue",
+    "file": "src/BluettiWatcher/DtekWatcher/DtekMatcher.cs",
+    "from": "int count = h.Candidate == only ? h.Count + 1 : 1;",
+    "to": "int count = h.Count + 1;"
+  },
+  {
+    "name": "dtek watcher hint: a cut that follows the manual queue no longer ends the row",
+    "file": "src/BluettiWatcher/DtekWatcher/DtekMatcher.cs",
+    "from": "if (matched.Contains(group)) return new DtekHint { Group = group };",
+    "to": "if (matched.Contains(group)) return h;"
+  },
+  {
+    "name": "dtek watcher hint: what was counted against another dtekWatcher.group is kept",
+    "file": "src/BluettiWatcher/DtekWatcher/DtekModel.cs",
+    "from": "group is not null && saved is not null && saved.Group == group ? saved",
+    "to": "group is not null && saved is not null ? saved"
+  },
+  { "name": "union edge: an unknown half hour of one member beats another member's planned off", "file": "src/BluettiWatcher/DtekWatcher/DtekTime.cs",
+    "from": "DtekSlot.Off => 3, DtekSlot.Unknown => 2,", "to": "DtekSlot.Off => 2, DtekSlot.Unknown => 3," },
+  { "name": "re-hibernate: a wake by hand is hibernated without a reading too", "file": "src/BluettiWatcher/WakeKeeper.cs",
+    "from": "return TimerWoke && !_read && _resumedAt", "to": "return (TimerWoke || _s.Armed) && !_read && _resumedAt" },
+  { "name": "disarm at start: nothing owed after a start", "file": "src/BluettiWatcher/WakeKeeper.cs", "group": "wake-start",
+    "from": "private bool _owed = true;", "to": "private bool _owed = config.DryRun;" },
+  { "name": "port lock: a start no longer waits for the old instance to let go", "file": "src/BluettiWatcher/Io/InstanceLock.cs",
+    "from": "if (TryWait(mutex, wait)) {", "to": "if (TryWait(mutex, TimeSpan.Zero)) {" }
+]

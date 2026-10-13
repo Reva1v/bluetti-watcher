@@ -1,0 +1,9 @@
+<Project>
+  <ItemGroup>
+    <!-- MIT (Microsoft.Data.Sqlite), Apache-2.0 (SQLitePCLRaw), Apache-2.0 (xunit), MIT (Test SDK). -->
+    <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.12" />
+    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.10.1" />
+  </ItemGroup>
+</Project>

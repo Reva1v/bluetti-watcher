@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      # install.ps1's dry run (tools/test-install.ps1) checks for Python 3.12-3.14 on PATH.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: .NET tests
+        run: dotnet test bluetti-watcher.slnx -c Release
+
+      - name: Node tests (power-mode switch and its integration hook)
+        run: node --test power-mode/power-mode.test.js integrations/claude-code/power-mode.test.js
+
+      - name: PowerShell tool tests
+        run: |
+          $failed = @()
+          foreach ($t in Get-ChildItem tools -Filter 'test-*.ps1' | Sort-Object Name) {
+            Write-Output "== $($t.Name)"
+            pwsh -NoProfile -NonInteractive -File $t.FullName
+            # 0 passed, 1 failed, 2 did not run: only 0 is a pass.
+            if ($LASTEXITCODE -ne 0) { $failed += "$($t.Name) (exit $LASTEXITCODE)" }
+          }
+          if ($failed) { Write-Output "failed: $($failed -join ', ')"; exit 1 }
