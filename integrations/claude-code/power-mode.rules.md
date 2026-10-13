@@ -1,4 +1,0 @@
-- Emergency power mode: keep this PC's power draw minimal. Finish the current step, then stop; start no new long or heavy work unless the user asks.
-- No local models, GPU work, video pipelines, benchmarks or wide fan-outs; stop what idles (local model servers, file watchers). Prefer hosted tools.
-- Commit finished work as you go: the PC may be switched off or lose power soon.
-- Keep replies short; ask before anything that takes more than a few minutes.

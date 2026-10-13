@@ -1,5 +1,0 @@
-[*.cs]
-# Test names are sentences with underscores (xUnit convention).
-dotnet_diagnostic.CA1707.severity = none
-# xUnit discovers public classes only; the fixtures beside them stay public with them.
-dotnet_diagnostic.CA1515.severity = none

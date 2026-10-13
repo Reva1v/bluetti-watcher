@@ -21,10 +21,10 @@ description: "Task list for 001-rust-station-watcher"
 
 **Purpose**: чистый Rust-проект на месте C#-кода
 
-- [ ] T001 Удалить старый код: `src/BluettiWatcher/`, `tests/BluettiWatcher.Tests/`, `tests/.editorconfig`, `power-mode/`, `integrations/`, `tools/`, `install.ps1`, `requirements.lock`, `bluetti-watcher.slnx`, `Directory.Build.props`, `Directory.Packages.props`, `global.json`, `nuget.config`, `docs/api.md`, `docs/configuration.md`, `docs/design.md`, `.github/workflows/*.yml`, `.github/ISSUE_TEMPLATE/`, `.github/PULL_REQUEST_TEMPLATE.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`, `README.uk.md`; оставить `LICENSE` (дописать строку `Copyright (c) 2026 Reva1v` под копирайтом оригинала), `.editorconfig`, `.gitattributes`, `docs/*.png` удалить
-- [ ] T002 Создать `Cargo.toml` (name `bluetti-watcher`, edition 2024, `[profile.release]` lto = true, opt-level = "s", strip = true, panic = "abort") с зависимостями из plan.md → Technical Context; `src/main.rs` с `#![windows_subsystem = "windows"]` и пустым `clap`-диспетчером команд `run|open|scan|read-once|install|uninstall|status|gpu-apply` (contracts/cli-config.md)
-- [ ] T003 [P] `.gitignore` для Rust (`/target`), `rustfmt.toml` (max_width = 110), `clippy.toml` при необходимости
-- [ ] T004 [P] CI `.github/workflows/ci.yml`: windows-latest, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cargo build --release`, артефакт exe
+- [X] T001 Удалить старый код: `src/BluettiWatcher/`, `tests/BluettiWatcher.Tests/`, `tests/.editorconfig`, `power-mode/`, `integrations/`, `tools/`, `install.ps1`, `requirements.lock`, `bluetti-watcher.slnx`, `Directory.Build.props`, `Directory.Packages.props`, `global.json`, `nuget.config`, `docs/api.md`, `docs/configuration.md`, `docs/design.md`, `.github/workflows/*.yml`, `.github/ISSUE_TEMPLATE/`, `.github/PULL_REQUEST_TEMPLATE.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`, `README.uk.md`; оставить `LICENSE` (дописать строку `Copyright (c) 2026 Reva1v` под копирайтом оригинала), `.editorconfig`, `.gitattributes`, `docs/*.png` удалить
+- [X] T002 Создать `Cargo.toml` (name `bluetti-watcher`, edition 2024, `[profile.release]` lto = true, opt-level = "s", strip = true, panic = "abort") с зависимостями из plan.md → Technical Context; `src/main.rs` с `#![windows_subsystem = "windows"]` и пустым `clap`-диспетчером команд `run|open|scan|read-once|install|uninstall|status|gpu-apply` (contracts/cli-config.md)
+- [X] T003 [P] `.gitignore` для Rust (`/target`), `rustfmt.toml` (max_width = 110), `clippy.toml` при необходимости
+- [X] T004 [P] CI `.github/workflows/ci.yml`: windows-latest, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cargo build --release`, артефакт exe
 
 ---
 
@@ -32,11 +32,11 @@ description: "Task list for 001-rust-station-watcher"
 
 **Purpose**: общее для всех историй. **Блокирует все истории.**
 
-- [ ] T005 `src/config.rs`: структура `Config` по `config.toml` из contracts/cli-config.md со всеми значениями по умолчанию; загрузка из `%LOCALAPPDATA%\bluetti-watcher\config.toml`; невалидный ключ → значение по умолчанию + запись в список предупреждений; пустой/неверный `mac` → `Config.mac = None`; unit-тесты на дефолты, частичный файл, неверные типы и диапазоны (проценты 0–100, `cpu_max_pct` 5–100)
-- [ ] T006 [P] `src/paths.rs`: каталог данных `%LOCALAPPDATA%\bluetti-watcher` (`bin\`, `logs\`, `station.db`, `config.toml`, `no-hibernate`), `%ProgramData%\bluetti-watcher\gpu-request`; создание каталогов
-- [ ] T007 [P] `src/logging.rs`: `tracing` в `logs\service.log` с ротацией по размеру 5 МБ × 2 файла (`service.log`, `service.log.1`), FR-009; консольный вывод для команд, подключившихся к консоли родителя (`AttachConsole(ATTACH_PARENT_PROCESS)` в `src/console.rs`)
-- [ ] T008 [P] `src/clock.rs`: `trait Clock { fn now(&self) -> Timestamp }`, системная и фейковая реализации; тип `Timestamp` (мс UTC) и форматирование в локальное ISO 8601 со смещением
-- [ ] T009 `src/model.rs`: `Reading { ts, soc: Option<u8>, ac_in_w, ac_out_w, dc_in_w, dc_out_w: Option<u32>, ac_in_v: Option<f32> }`, `ReadStatus` (`accepted|rejected|rebased|miss`) и причины (`incomplete`, `implausible`, `timeout`, `ble-off`, `not-found`, `modbus-error`, `crypto-error`) из data-model.md
+- [X] T005 `src/config.rs`: структура `Config` по `config.toml` из contracts/cli-config.md со всеми значениями по умолчанию; загрузка из `%LOCALAPPDATA%\bluetti-watcher\config.toml`; невалидный ключ → значение по умолчанию + запись в список предупреждений; пустой/неверный `mac` → `Config.mac = None`; unit-тесты на дефолты, частичный файл, неверные типы и диапазоны (проценты 0–100, `cpu_max_pct` 5–100)
+- [X] T006 [P] `src/paths.rs`: каталог данных `%LOCALAPPDATA%\bluetti-watcher` (`bin\`, `logs\`, `station.db`, `config.toml`, `no-hibernate`), `%ProgramData%\bluetti-watcher\gpu-request`; создание каталогов
+- [X] T007 [P] `src/logging.rs`: `tracing` в `logs\service.log` с ротацией по размеру 5 МБ × 2 файла (`service.log`, `service.log.1`), FR-009; консольный вывод для команд, подключившихся к консоли родителя (`AttachConsole(ATTACH_PARENT_PROCESS)` в `src/console.rs`)
+- [X] T008 [P] `src/clock.rs`: `trait Clock { fn now(&self) -> Timestamp }`, системная и фейковая реализации; тип `Timestamp` (мс UTC) и форматирование в локальное ISO 8601 со смещением
+- [X] T009 `src/model.rs`: `Reading { ts, soc: Option<u8>, ac_in_w, ac_out_w, dc_in_w, dc_out_w: Option<u32>, ac_in_v: Option<f32> }`, `ReadStatus` (`accepted|rejected|rebased|miss`) и причины (`incomplete`, `implausible`, `timeout`, `ble-off`, `not-found`, `modbus-error`, `crypto-error`) из data-model.md
 
 **Checkpoint**: каркас собирается, `cargo test` зелёный
 

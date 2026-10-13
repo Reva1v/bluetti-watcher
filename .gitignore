@@ -1,12 +1,10 @@
-bin/
-obj/
-.venv/
-dist/
-.vs/
-*.user
+/target/
+*.rs.bk
 *.db
 *.db-*
-# Never commit a cloud token.
-cloud-token.json
-# The analyzer configuration is part of the build (a global ignore drops it).
-!.editorconfig
+*.log
+.env*
+.idea/
+.vscode/
+Thumbs.db
+*.tmp
