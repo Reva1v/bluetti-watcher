@@ -11,7 +11,7 @@
 | `open` | окно дашборда; если `/api/health` не отвечает 3 с — запускает задачу `BluettiWatcher` и ждёт до 10 с | 0 / 1 |
 | `scan` | 10 с слушает рекламу BLE, печатает найденные BLUETTI: имя, адрес, RSSI | 0 / 1 нет адаптера |
 | `read-once [--mac ..] [--trace]` | одно чтение, печать полей; `--trace` — каждый кадр hex (ключи не печатаются) | 0 / 1 нет ответа |
-| `install --mac AA:BB:.. [--port N] [--elevated-setup]` | копирует exe в `%LOCALAPPDATA%\bluetti-watcher\bin`, пишет `config.toml`, создаёт схему «Bluetti Eco», задачу автозапуска, ярлыки (Рабочий стол, «Пуск» с AUMID), запускает сервис. `--elevated-setup` запрашивает UAC один раз: `powercfg /h on` и задача `BluettiWatcherGpu` | 0 / 1 |
+| `install [--mac AA:BB:..] [--port N] [--elevated-setup]` | без `--mac` — сканирует и берёт единственную найденную станцию (несколько — печатает список и выходит с 1); копирует exe в `%LOCALAPPDATA%\bluetti-watcher\bin`, пишет `config.toml`, создаёт схему «Bluetti Eco», задачу автозапуска, ярлыки (Рабочий стол, «Пуск» с AUMID), запускает сервис. `--elevated-setup` запрашивает UAC один раз: `powercfg /h on` и задача `BluettiWatcherGpu` | 0 / 1 |
 | `uninstall [--purge]` | снимает eco, останавливает сервис, удаляет задачи, ярлыки, схему; `--purge` — и данные | 0 / 1 |
 | `status` | одна строка: сервис, сеть, заряд, eco | 0 |
 | `gpu-apply` | только из задачи `BluettiWatcherGpu` (элевировано): читает `gpu-request`, ставит лимит GPU | 0 / 1 / 2 нет NVIDIA |

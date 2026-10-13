@@ -67,4 +67,5 @@ Server-Sent Events: `event: now`, `data: <тело /api/now>` после каж�
 
 ## GET /api/health
 
-`{ "ok": true, "version": "0.1.0", "lastReading": "<ts>|null", "encryption": true|null }` — для ярлыка и установщика.
+`{ "ok": true, "version": "0.1.0", "lastReading": "<ts>|null", "encryption": true|null, "readOk24h": 0.97 }` — для
+ярлыка и установщика. `readOk24h` — доля циклов за 24 ч с принятым показанием (SC-001), null при < 10 циклах.
