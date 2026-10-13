@@ -87,6 +87,7 @@
     if (ts) {
       const sec = (nowMs - ts) / 1000;
       setText('st-text', (n.stale ? 'Последнее показание в ' : 'Показание в ') + hm(ts) + ' · ' + ago(sec));
+      tbChip(n);
     } else {
       setText('st-text', 'Показаний ещё нет');
     }
@@ -480,6 +481,39 @@
     const visible = document.visibilityState === 'visible';
     if (visible && !timer) { timer = setInterval(render, 1000); render(); maybeRefreshHistory(); }
     else if (!visible && timer) { clearInterval(timer); timer = 0; }
+  }
+
+  // ---------- окно приложения (WebView2): своя верхняя панель ----------
+  function tbChip(n) {
+    const chip = $('tb-chip');
+    if (!chip || !document.body.classList.contains('app')) return;
+    const parts = [];
+    if (n.soc != null) parts.push(n.soc + ' %');
+    parts.push(n.mains === 'on' ? 'сеть есть' : n.mains === 'off' ? 'от батареи' : 'сеть неизвестна');
+    if (n.eco === 'eco') parts.push('eco');
+    if (n.eco === 'deep') parts.push('глубокий eco');
+    setText('tb-chip', parts.join(' · '));
+    chip.classList.toggle('on-battery', n.mains === 'off');
+    show('tb-chip', true);
+  }
+  // `?frame` — показать панель и в обычном браузере (скриншоты для README); кнопки там ничего не делают.
+  const inApp = window.ipc && typeof window.ipc.postMessage === 'function';
+  if (inApp || new URLSearchParams(location.search).has('frame')) {
+    const send = (m) => { if (inApp) window.ipc.postMessage(m); };
+    document.body.classList.add('app');
+    show('titlebar', true);
+    const drag = $('tb-drag');
+    drag.addEventListener('mousedown', (e) => { if (e.button === 0 && e.detail === 1) send('drag'); });
+    drag.addEventListener('dblclick', () => send('max'));
+    $('tb-min').addEventListener('click', () => send('min'));
+    $('tb-max').addEventListener('click', () => send('max'));
+    $('tb-close').addEventListener('click', () => send('close'));
+    // Окно сообщает, развернуто ли оно: меняем значок и подпись кнопки.
+    window.__setMaximized = (on) => {
+      $('tb-max-icon').toggleAttribute('hidden', on);
+      $('tb-restore-icon').toggleAttribute('hidden', !on);
+      $('tb-max').setAttribute('aria-label', on ? 'Восстановить' : 'Развернуть');
+    };
   }
 
   // ---------- start ----------

@@ -187,3 +187,40 @@ td.c { color: var(--soft); }
   .tv { font-size: 22px; }
   .tabs button { padding: 0 10px; }
 }
+
+/* ---------- окно приложения: своя верхняя панель и прокрутка ---------- */
+body.app { height: 100vh; overflow: hidden; }
+body.app .scroller { position: absolute; top: 36px; left: 0; right: 0; bottom: 0; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; }
+
+.titlebar {
+  position: fixed; top: 0; left: 0; right: 0; height: 36px; z-index: 10;
+  display: flex; align-items: stretch; justify-content: space-between;
+  background: rgba(12, 12, 12, 0.92); border-bottom: 1px solid #222;
+  backdrop-filter: blur(8px); user-select: none;
+}
+.titlebar[hidden] { display: none; }
+.tb-drag { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 10px; padding-left: 14px; }
+.tb-icon { flex: 0 0 auto; }
+.tb-title { font-size: 13px; font-weight: 600; color: #D9DEE2; letter-spacing: 0.2px; white-space: nowrap; }
+.tb-chip {
+  font-size: 12px; color: var(--muted); padding: 2px 8px; border-radius: 999px;
+  background: #1B1B1B; border: 1px solid #2A2A2A; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tb-chip.on-battery { color: #FFB47A; border-color: #5A2E10; background: #2A160A; }
+.tb-buttons { display: flex; flex: 0 0 auto; }
+.tb-btn {
+  width: 46px; height: 36px; border: 0; padding: 0; margin: 0; background: transparent; color: #B8C0C6;
+  display: inline-flex; align-items: center; justify-content: center; cursor: default;
+}
+.tb-btn:hover { background: #222; color: #FFFFFF; }
+.tb-btn:active { background: #2C2C2C; }
+.tb-close:hover { background: #E81123; color: #FFFFFF; }
+.tb-close:active { background: #B50E1B; }
+
+/* Тонкий тёмный скроллбар (WebView2/Chromium). */
+* { scrollbar-width: thin; scrollbar-color: #3A3A3A transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #2E2E2E; border-radius: 10px; border: 3px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: #474747; background-clip: content-box; }
+::-webkit-scrollbar-corner { background: transparent; }
