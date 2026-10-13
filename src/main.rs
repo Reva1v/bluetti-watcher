@@ -1,13 +1,6 @@
 #![windows_subsystem = "windows"]
-// Модули подключаются по мере реализации задач; снять перед T055.
-#![allow(dead_code)]
 
-mod clock;
-mod config;
-mod console;
-mod logging;
-mod model;
-mod paths;
+use bluetti_watcher::{config, console, logging, paths};
 
 use std::process::ExitCode;
 
@@ -78,9 +71,96 @@ fn main() -> ExitCode {
             tracing::info!("сервис ещё не реализован");
             ExitCode::SUCCESS
         }
+        Command::Scan => {
+            logging::init(None, true, false);
+            block_on(cmd_scan())
+        }
+        Command::ReadOnce { mac, trace } => {
+            logging::init(None, true, trace);
+            block_on(cmd_read_once(&paths, mac, trace))
+        }
         _ => {
             logging::init(None, true, false);
             eprintln!("команда ещё не реализована");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn block_on<F: std::future::Future<Output = ExitCode>>(f: F) -> ExitCode {
+    match tokio::runtime::Builder::new_current_thread().enable_time().build() {
+        Ok(rt) => rt.block_on(f),
+        Err(e) => {
+            eprintln!("не удалось запустить рантайм: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn cmd_scan() -> ExitCode {
+    println!("Ищу станции BLUETTI 10 секунд…");
+    match bluetti_watcher::ble::scan::scan(std::time::Duration::from_secs(10)).await {
+        Ok(found) if found.is_empty() => {
+            println!(
+                "Ничего не найдено. Станция включена и рядом? Телефон с приложением BLUETTI не подключён к ней?"
+            );
+            ExitCode::FAILURE
+        }
+        Ok(found) => {
+            for f in found {
+                println!("{:<16} {}  RSSI {} dBm", f.name, config::format_mac(f.address), f.rssi);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("Сканирование не удалось (Bluetooth выключен?): {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn cmd_read_once(paths: &paths::Paths, mac: Option<String>, trace: bool) -> ExitCode {
+    let address = match mac {
+        Some(m) => match config::parse_mac(&m) {
+            Some(a) => a,
+            None => {
+                eprintln!("неверный адрес {m}: нужен вид AA:BB:CC:DD:EE:FF");
+                return ExitCode::from(2);
+            }
+        },
+        None => match config::load(&paths.config()).config.mac {
+            Some(a) => a,
+            None => {
+                eprintln!("адрес не задан: --mac AA:BB:CC:DD:EE:FF или mac в config.toml");
+                return ExitCode::from(2);
+            }
+        },
+    };
+    let mut transport = bluetti_watcher::ble::winrt::WinRtTransport::new(address);
+    let keys = bluetti_watcher::ble::crypto::Keys::bluetti();
+    let opts = bluetti_watcher::ble::ReadOptions::default();
+    let started = std::time::Instant::now();
+    let now = bluetti_watcher::clock::Clock::now(&bluetti_watcher::clock::SystemClock);
+    match bluetti_watcher::ble::read_station(&mut transport, &keys, &opts, now).await {
+        Ok(out) => {
+            let r = out.reading;
+            let f = |v: Option<u32>| v.map_or("—".to_string(), |x| format!("{x} Вт"));
+            println!("станция   {}", config::format_mac(address));
+            println!("шифрование {}", if out.encrypted { "да" } else { "нет" });
+            println!("заряд     {}", r.soc.map_or("—".to_string(), |x| format!("{x} %")));
+            println!("вход AC   {}", f(r.ac_in_w));
+            println!("выход AC  {}", f(r.ac_out_w));
+            println!("вход DC   {}", f(r.dc_in_w));
+            println!("выход DC  {}", f(r.dc_out_w));
+            println!("напряж.AC {}", r.ac_in_v.map_or("—".to_string(), |x| format!("{x:.1} В")));
+            println!("время     {:.1} с", started.elapsed().as_secs_f32());
+            if trace {
+                println!("(кадры выше в логе, ключи сессии не печатаются)");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("нет ответа: {e} ({})", e.code());
             ExitCode::FAILURE
         }
     }

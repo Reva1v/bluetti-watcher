@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 aes = "0.8"
 anyhow = "1.0.104"
-cbc = "0.1"
+cbc = { version = "0.1", features = ["alloc"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6.7", features = ["derive"] }
 futures-util = "0.3.34"
