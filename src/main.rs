@@ -70,6 +70,11 @@ fn main() -> ExitCode {
             logging::init(Some(&paths.logs_dir()), has_console, false);
             block_on(cmd_run(&paths, dry_run))
         }
+        Command::Open => {
+            let _ = paths.ensure();
+            logging::init(Some(&paths.logs_dir()), false, false);
+            cmd_open(&paths)
+        }
         Command::Scan => {
             logging::init(None, true, false);
             block_on(cmd_scan())
@@ -81,6 +86,20 @@ fn main() -> ExitCode {
         _ => {
             logging::init(None, true, false);
             eprintln!("команда ещё не реализована");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_open(paths: &paths::Paths) -> ExitCode {
+    let port = config::load(&paths.config()).config.port;
+    if !bluetti_watcher::window::ensure_service(port) {
+        tracing::error!("сервис не ответил на порту {port} за 13 с");
+    }
+    match bluetti_watcher::window::open(port, paths.data.join("webview")) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            tracing::error!("окно дашборда: {e}");
             ExitCode::FAILURE
         }
     }
