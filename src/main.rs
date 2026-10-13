@@ -138,7 +138,8 @@ fn block_on<F: std::future::Future<Output = ExitCode>>(f: F) -> ExitCode {
 }
 
 async fn cmd_run(paths: &paths::Paths, dry_run: bool) -> ExitCode {
-    let Some(_guard) = bluetti_watcher::instance::acquire() else {
+    let mutex = bluetti_watcher::instance::mutex_name(&paths.data, &paths::Paths::default_data());
+    let Some(_guard) = bluetti_watcher::instance::acquire(&mutex) else {
         tracing::info!("сервис уже запущен");
         return ExitCode::from(3);
     };

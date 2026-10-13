@@ -16,6 +16,14 @@ impl Paths {
         Self { data: base.join("bluetti-watcher") }
     }
 
+    /// Каталог данных по умолчанию, без учёта `BLUETTI_WATCHER_HOME`.
+    pub fn default_data() -> PathBuf {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("bluetti-watcher")
+    }
+
     pub fn bin_dir(&self) -> PathBuf {
         self.data.join("bin")
     }
