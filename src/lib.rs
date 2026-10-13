@@ -5,6 +5,7 @@ pub mod clock;
 pub mod config;
 pub mod console;
 pub mod decision;
+pub mod dtek;
 pub mod http;
 pub mod install;
 pub mod instance;

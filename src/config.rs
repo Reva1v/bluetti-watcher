@@ -16,6 +16,7 @@ pub struct Config {
     pub levels: Levels,
     pub eco: Eco,
     pub guards: Guards,
+    pub dtek: Dtek,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +61,26 @@ pub struct Guards {
     pub max_gap_sec: u32,
 }
 
+/// `[dtek]`: график отключений ДТЭК, только показ (feature 002).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Dtek {
+    pub enabled: bool,
+    /// Имя файла набора: `data/<region>.json`.
+    pub region: String,
+    /// Очереди-кандидаты `GPV<n>.<m>`, по порядку предпочтения.
+    pub queues: Vec<String>,
+    /// Подпись на карточке; никуда не отправляется.
+    pub address: String,
+    /// Переопределение адреса набора (только `https://`).
+    pub url: Option<String>,
+}
+
+impl Default for Dtek {
+    fn default() -> Self {
+        Self { enabled: false, region: "kyiv".into(), queues: Vec::new(), address: String::new(), url: None }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -89,6 +110,7 @@ impl Default for Config {
                 deep_gpu_pct: 0,
             },
             guards: Guards { soc_rate_per_min: 5.0, soc_jump_floor: 3, max_gap_sec: 600 },
+            dtek: Dtek::default(),
         }
     }
 }
@@ -201,6 +223,7 @@ pub fn parse(text: &str) -> Loaded {
                 as u8,
             max_gap_sec: r.int(Some("guards"), "max_gap_sec", d.guards.max_gap_sec as i64, 120, 7200) as u32,
         },
+        dtek: read_dtek(&mut r, &d.dtek),
     };
 
     let mut config = config;
@@ -213,6 +236,45 @@ pub fn parse(text: &str) -> Loaded {
         config.levels = d.levels;
     }
     Loaded { config, warnings: w }
+}
+
+fn read_dtek(r: &mut Reader, d: &Dtek) -> Dtek {
+    let s = Some("dtek");
+    let region = r.string(s, "region", &d.region);
+    let region = if !region.is_empty()
+        && region.len() <= 40
+        && region.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+    {
+        region
+    } else {
+        r.warnings
+            .push(format!("dtek.region = \"{region}\": нужны латинские буквы, цифры, - и _, взято kyiv"));
+        d.region.clone()
+    };
+    let mut queues: Vec<String> = Vec::new();
+    for q in r.strings(s, "queues") {
+        let q = q.trim().to_string();
+        if !crate::dtek::model::valid_queue(&q) {
+            r.warnings.push(format!("dtek.queues: «{q}» — не очередь вида GPV9.1, пропущена"));
+        } else if !queues.contains(&q) {
+            queues.push(q);
+        }
+    }
+    let url = match r.get(s, "url") {
+        None => None,
+        Some(Value::String(u)) if u.starts_with("https://") && u.len() > "https://".len() => Some(u.clone()),
+        Some(_) => {
+            r.warnings.push("dtek.url: нужен адрес https://…, взят адрес по умолчанию".into());
+            None
+        }
+    };
+    Dtek {
+        enabled: r.boolean(s, "enabled", d.enabled),
+        region,
+        queues,
+        address: r.string(s, "address", &d.address).chars().take(200).collect(),
+        url,
+    }
 }
 
 /// `AA:BB:CC:DD:EE:FF` (или через `-`) → 48-битный адрес.
@@ -289,6 +351,40 @@ impl Reader<'_> {
         }
     }
 
+    fn string(&mut self, section: Option<&str>, key: &str, default: &str) -> String {
+        match self.get(section, key) {
+            None => default.to_string(),
+            Some(Value::String(v)) => v.clone(),
+            Some(_) => {
+                let n = Self::name(section, key);
+                self.warnings.push(format!("{n}: нужна строка, взято «{default}»"));
+                default.to_string()
+            }
+        }
+    }
+
+    /// Список строк; нестроковые элементы пропускаются с предупреждением.
+    fn strings(&mut self, section: Option<&str>, key: &str) -> Vec<String> {
+        let n = Self::name(section, key);
+        match self.get(section, key).cloned() {
+            None => Vec::new(),
+            Some(Value::Array(items)) => {
+                let mut out = Vec::new();
+                for v in items {
+                    match v {
+                        Value::String(s) => out.push(s),
+                        other => self.warnings.push(format!("{n}: {other} — не строка, пропущено")),
+                    }
+                }
+                out
+            }
+            Some(_) => {
+                self.warnings.push(format!("{n}: нужен список строк, взят пустой"));
+                Vec::new()
+            }
+        }
+    }
+
     fn boolean(&mut self, section: Option<&str>, key: &str, default: bool) -> bool {
         match self.get(section, key) {
             None => default,
@@ -353,6 +449,47 @@ mod tests {
         let l = parse("mac = ");
         assert_eq!(l.config, Config::default());
         assert!(l.warnings[0].contains("не разобран"));
+    }
+
+    #[test]
+    fn dtek_defaults_and_values() {
+        let d = parse("mac = \"AA:BB:CC:DD:EE:FF\"").config.dtek;
+        assert_eq!(d, Dtek::default());
+        assert!(!d.enabled && d.region == "kyiv" && d.queues.is_empty() && d.url.is_none());
+        let l = parse(
+            "mac = \"AA:BB:CC:DD:EE:FF\"
+[dtek]
+enabled = true
+address = \"вул. Прикладна, 1\"
+             queues = [\"GPV9.1\", \"GPV21.1\", \"GPV9.1\"]
+url = \"https://example.org/k.json\"
+",
+        );
+        assert!(l.warnings.is_empty(), "{:?}", l.warnings);
+        let d = l.config.dtek;
+        assert!(d.enabled);
+        assert_eq!(d.queues, ["GPV9.1", "GPV21.1"]);
+        assert_eq!(d.address, "вул. Прикладна, 1");
+        assert_eq!(d.url.as_deref(), Some("https://example.org/k.json"));
+    }
+
+    #[test]
+    fn dtek_bad_values_fall_back() {
+        let l = parse(
+            "mac = \"AA:BB:CC:DD:EE:FF\"
+[dtek]
+enabled = \"yes\"
+region = \"../x\"
+             queues = [\"GPV9.1\", \"GPV123.1\", \"9.1\", 5, \"GPV1\"]
+url = \"http://example.org/k.json\"
+",
+        );
+        let d = l.config.dtek;
+        assert!(!d.enabled);
+        assert_eq!(d.region, "kyiv");
+        assert_eq!(d.queues, ["GPV9.1"]);
+        assert_eq!(d.url, None);
+        assert_eq!(l.warnings.len(), 7, "{:?}", l.warnings);
     }
 
     #[test]

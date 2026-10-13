@@ -145,6 +145,8 @@ impl Store {
     }
 
     fn init(db: Connection) -> rusqlite::Result<Self> {
+        // Сервис и задача графика ДТЭК пишут каждый своим соединением.
+        db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.pragma_update(None, "journal_mode", "WAL")?;
         db.pragma_update(None, "synchronous", "NORMAL")?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;

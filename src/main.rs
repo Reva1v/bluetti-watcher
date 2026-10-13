@@ -78,7 +78,8 @@ fn main() -> ExitCode {
         Command::Run { dry_run } => {
             let _ = paths.ensure();
             logging::init(Some(&paths.logs_dir()), has_console, false);
-            block_on(cmd_run(&paths, dry_run))
+            // LocalSet: WinRT-объекты задачи графика ДТЭК не `Send`, она идёт через `spawn_local` на том же потоке.
+            block_on(tokio::task::LocalSet::new().run_until(cmd_run(&paths, dry_run)))
         }
         Command::Open => {
             let _ = paths.ensure();
@@ -167,6 +168,8 @@ async fn cmd_run(paths: &paths::Paths, dry_run: bool) -> ExitCode {
     let (health_tx, health_rx) = tokio::sync::watch::channel(http::HealthView::default());
     let (events_tx, _) = tokio::sync::broadcast::channel(64);
     let (mode_tx, mode_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (dtek_tx, dtek_rx) = tokio::sync::watch::channel(bluetti_watcher::dtek::DtekView::disabled());
+    let outages_tx = spawn_dtek(&cfg, paths, events_tx.clone(), dtek_tx);
     let app = http::AppState {
         port: cfg.port,
         db_path: paths.db(),
@@ -174,6 +177,7 @@ async fn cmd_run(paths: &paths::Paths, dry_run: bool) -> ExitCode {
         events: events_tx.clone(),
         mode_tx,
         health: health_rx,
+        dtek: dtek_rx,
     };
     let port = cfg.port;
     tokio::spawn(async move {
@@ -187,7 +191,13 @@ async fn cmd_run(paths: &paths::Paths, dry_run: bool) -> ExitCode {
     let hibernator = Box::new(power::hibernate::WindowsHibernator { dry_run: cfg.dry_run });
     let installed = paths.bin_dir().join("bluetti-watcher.exe").exists();
     let notifier = Box::new(notify::ToastNotifier::new(installed));
-    let channels = service::Channels { now: now_tx, health: health_tx, events: events_tx, modes: mode_rx };
+    let channels = service::Channels {
+        now: now_tx,
+        health: health_tx,
+        events: events_tx,
+        modes: mode_rx,
+        outages: outages_tx,
+    };
     let reader = service::WinRtReader::new(cfg.mac);
     let mut svc = service::Service::new(
         cfg,
@@ -202,6 +212,40 @@ async fn cmd_run(paths: &paths::Paths, dry_run: bool) -> ExitCode {
     );
     svc.run().await;
     ExitCode::SUCCESS
+}
+
+/// Задача графика ДТЭК (только при `[dtek] enabled = true`); канал — для закончившихся отключений.
+fn spawn_dtek(
+    cfg: &config::Config,
+    paths: &paths::Paths,
+    events: tokio::sync::broadcast::Sender<bluetti_watcher::store::Event>,
+    view: tokio::sync::watch::Sender<bluetti_watcher::dtek::DtekView>,
+) -> Option<tokio::sync::mpsc::UnboundedSender<bluetti_watcher::dtek::FinishedOutage>> {
+    use bluetti_watcher::dtek;
+    if !cfg.dtek.enabled {
+        // Снимок «выключено» остаётся в канале, `/api/dtek` отдаёт его.
+        return None;
+    }
+    let store = match bluetti_watcher::store::Store::open(&paths.db()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("график ДТЭК: не открыть {}: {e}", paths.db().display());
+            let now = bluetti_watcher::clock::Clock::now(&bluetti_watcher::clock::SystemClock);
+            view.send_replace(dtek::view(&cfg.dtek, None, &Default::default(), Some("база недоступна"), now));
+            return None;
+        }
+    };
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let refresher = dtek::Refresher::new(
+        cfg.dtek.clone(),
+        store,
+        dtek::fetch::WinRtSource,
+        bluetti_watcher::clock::SystemClock,
+        events,
+        view,
+    );
+    tokio::task::spawn_local(refresher.run(rx));
+    Some(tx)
 }
 
 fn cmd_gpu_apply(paths: &paths::Paths) -> ExitCode {
