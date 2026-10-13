@@ -13,7 +13,7 @@ use axum::extract::{Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{self, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse, Json, Response};
+use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,8 @@ use crate::model::{EcoLevel, Mains, ManualMode};
 use crate::runtime::Source;
 use crate::store::{self, Range, Store};
 
-const INDEX_HTML: &str = include_str!("web/index.html");
+mod assets;
+
 /// Заголовок, без которого `POST /api/mode` отвергается (форма с чужого сайта его не пошлёт).
 pub const MODE_HEADER: &str = "x-bluetti-watcher";
 
@@ -137,7 +138,7 @@ pub fn router(state: AppState) -> Router {
         db: Mutex::new(None),
     });
     Router::new()
-        .route("/", get(|| async { Html(INDEX_HTML) }))
+        .merge(assets::routes())
         .route("/api/now", get(now))
         .route("/api/history", get(history))
         .route("/api/outages", get(outages))
@@ -420,13 +421,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn index_is_html() {
-        let e = env("index");
-        let r = req(Method::GET, "/", Some("localhost:8765")).body(Body::empty()).unwrap();
-        let resp = e.app.clone().oneshot(r).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let b = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
-        assert!(String::from_utf8_lossy(&b).contains("Bluetti Watcher"));
+    async fn assets_have_types_and_no_cache() {
+        let e = env("assets");
+        for (uri, ctype, needle) in [
+            ("/", "text/html; charset=utf-8", "/app.js"),
+            ("/app.js", "text/javascript; charset=utf-8", "/api/stream"),
+            ("/style.css", "text/css; charset=utf-8", "--accent"),
+            ("/uplot.min.js", "text/javascript; charset=utf-8", "uPlot (v1.6"),
+            ("/uplot.min.css", "text/css; charset=utf-8", ".uplot"),
+        ] {
+            let r = req(Method::GET, uri, Some("localhost:8765")).body(Body::empty()).unwrap();
+            let resp = e.app.clone().oneshot(r).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+            assert_eq!(resp.headers()[header::CONTENT_TYPE], ctype, "{uri}");
+            assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-cache", "{uri}");
+            let b = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+            let text = String::from_utf8_lossy(&b);
+            assert!(text.contains(needle), "{uri} lacks {needle}");
+            if uri == "/" {
+                assert!(text.contains("Bluetti Watcher") && !text.contains("https://"), "{uri}");
+            }
+        }
+        let r = req(Method::GET, "/app.js", Some("evil.example:8765")).body(Body::empty()).unwrap();
+        assert_eq!(e.app.clone().oneshot(r).await.unwrap().status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

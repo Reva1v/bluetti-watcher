@@ -4,9 +4,151 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bluetti Watcher</title>
+<link rel="stylesheet" href="/uplot.min.css">
+<link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<h1>Bluetti Watcher</h1>
-<p>Дашборд в разработке. Данные: <a href="/api/now">/api/now</a>, <a href="/api/health">/api/health</a>.</p>
+<div class="wrap">
+
+<header class="top">
+  <div class="brand">
+    <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><rect x="3" y="8" width="25" height="18" rx="4" fill="none" stroke="#FF6F1A" stroke-width="2.2"></rect><rect x="29" y="13" width="3" height="8" rx="1.5" fill="#FF6F1A"></rect><path d="M17 11 L12 18 H16 L14 23 L20 15 H16 Z" fill="#FF6F1A"></path></svg>
+    <div class="brand-text">
+      <span class="brand-name">Bluetti Watcher <span id="dry" class="badge" hidden>dry run</span></span>
+      <span class="sub">AC180P</span>
+    </div>
+  </div>
+  <div class="status" aria-live="polite">
+    <span id="st-dot" class="dot"></span>
+    <span id="st-text">Подключение…</span>
+  </div>
+</header>
+
+<div id="b-conn" class="banner b-grey" role="alert" hidden>
+  <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="#9AA6AF" stroke-width="1.8"></circle><path d="M6 10 H14" stroke="#9AA6AF" stroke-width="1.8" stroke-linecap="round"></path></svg>
+  <span>Нет связи с сервисом. Переподключение…</span>
+</div>
+<div id="b-stale" class="banner b-red" role="alert" hidden>
+  <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="#FF7A66" stroke-width="1.8"></circle><path d="M10 5.5 V11 M10 13.5 V14" stroke="#FF7A66" stroke-width="1.8" stroke-linecap="round"></path></svg>
+  <span id="b-stale-text"></span>
+</div>
+<div id="b-hib" class="banner b-amber" role="status" hidden>
+  <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2 L19 18 H1 Z" fill="none" stroke="#FF6F1A" stroke-width="1.8" stroke-linejoin="round"></path><path d="M10 8 V12 M10 14.5 V15" stroke="#FF6F1A" stroke-width="1.8" stroke-linecap="round"></path></svg>
+  <span>Гибернация в Windows выключена: на 5 % ПК не сможет уйти в гибернацию. Включается один раз командой <code>install --elevated-setup</code>.</span>
+</div>
+<div id="b-kill" class="banner b-amber" role="status" hidden>
+  <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2 L19 18 H1 Z" fill="none" stroke="#FF6F1A" stroke-width="1.8" stroke-linejoin="round"></path><path d="M10 8 V12 M10 14.5 V15" stroke="#FF6F1A" stroke-width="1.8" stroke-linecap="round"></path></svg>
+  <span>Гибернация отключена файлом <code>no-hibernate</code>. Удалите файл, чтобы ПК снова мог уйти в гибернацию на 5 %.</span>
+</div>
+
+<section class="cards">
+  <div id="c-charge" class="card">
+    <div class="card-head">
+      <span class="label">Заряд</span>
+      <span id="pill" class="pill" hidden></span>
+    </div>
+    <div class="big-row">
+      <span id="soc" class="soc live">—</span>
+      <span class="unit">%</span>
+    </div>
+    <div class="meter">
+      <div class="bar" aria-hidden="true">
+        <div id="socbar" class="fill live"></div>
+        <i style="left:20%"></i><i style="left:10%"></i><i style="left:5%"></i>
+      </div>
+      <div class="ticks" aria-hidden="true">
+        <span style="left:3%">5</span><span style="left:8.5%">10</span><span style="left:18.5%">20</span><span style="right:0">100</span>
+      </div>
+    </div>
+    <span id="soc-note" class="note"></span>
+  </div>
+
+  <div class="card">
+    <span id="tl-title" class="label">Осталось</span>
+    <div class="big-row wrap-row">
+      <span id="tl-big" class="tl live">—</span>
+      <span id="tl-unit" class="unit-s"></span>
+    </div>
+    <span id="tl-sub" class="soft"></span>
+    <div id="tl-foot" class="foot" hidden>
+      <span id="tl-m1"></span>
+      <span id="tl-m2"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <span class="label">Режим ПК</span>
+    <div class="seg" role="group" aria-label="Режим">
+      <button type="button" data-mode="auto" aria-pressed="false">Авто</button>
+      <button type="button" data-mode="eco" aria-pressed="false">Eco</button>
+      <button type="button" data-mode="max" aria-pressed="false">Максимум</button>
+    </div>
+    <div class="mode-text">
+      <span id="mode-title" class="mode-title"></span>
+      <span id="mode-detail" class="dim"></span>
+      <span id="mode-err" class="err" role="alert" hidden></span>
+    </div>
+  </div>
+</section>
+
+<section class="tiles" aria-label="Мощности">
+  <div class="tile"><span class="dim">Вход AC</span><span class="tv live"><b id="t-acin">—</b> <small>Вт</small></span></div>
+  <div class="tile"><span class="dim">Выход AC</span><span class="tv live"><b id="t-acout">—</b> <small>Вт</small></span></div>
+  <div class="tile"><span class="dim">Вход DC</span><span class="tv live"><b id="t-dcin">—</b> <small>Вт</small></span></div>
+  <div class="tile"><span class="dim">Выход DC</span><span class="tv live"><b id="t-dcout">—</b> <small>Вт</small></span></div>
+  <div class="tile"><span class="dim">Напряжение сети</span><span class="tv live"><b id="t-v">—</b> <small>В</small></span></div>
+</section>
+
+<section class="card hist">
+  <div class="hist-head">
+    <h2>История</h2>
+    <div class="tabs" role="group" aria-label="Период">
+      <button type="button" data-range="6h" aria-pressed="true">6 ч</button>
+      <button type="button" data-range="24h" aria-pressed="false">24 ч</button>
+      <button type="button" data-range="7d" aria-pressed="false">7 д</button>
+      <button type="button" data-range="30d" aria-pressed="false">30 д</button>
+    </div>
+  </div>
+  <div class="chart-block">
+    <div class="legend">
+      <span class="lt">Заряд, %</span>
+      <span class="li"><i class="sw-band"></i>Отключение</span>
+      <span id="readout" class="readout"></span>
+    </div>
+    <div id="ch-soc" class="chart" role="img" aria-label="График заряда за 6 часов"></div>
+  </div>
+  <div class="chart-block">
+    <div class="legend">
+      <span class="lt">Мощность, Вт</span>
+      <span class="li"><i class="sw-line" style="background:#5AA9FF"></i>Вход</span>
+      <span class="li"><i class="sw-line" style="background:#FF6F1A"></i>Нагрузка</span>
+    </div>
+    <div id="ch-pow" class="chart" role="img" aria-label="График мощности за 6 часов: вход и нагрузка"></div>
+  </div>
+  <span id="hist-empty" class="dim" hidden>Показаний за этот период нет.</span>
+</section>
+
+<section class="lists">
+  <div class="card outages">
+    <h2>Отключения</h2>
+    <div class="scroll-x">
+      <table>
+        <thead><tr><th>Начало</th><th>Длительность</th><th>Заряд</th><th>Eco</th><th>Гибернация</th></tr></thead>
+        <tbody id="out-body"></tbody>
+      </table>
+    </div>
+    <span id="out-empty" class="dim" hidden>Отключений ещё не было.</span>
+  </div>
+  <div class="card events">
+    <h2>События</h2>
+    <span id="last-err" class="err" hidden></span>
+    <ol id="ev-list"></ol>
+    <span id="ev-empty" class="dim" hidden>Событий пока нет.</span>
+  </div>
+</section>
+
+</div>
+<script src="/uplot.min.js"></script>
+<script src="/app.js"></script>
 </body>
 </html>
