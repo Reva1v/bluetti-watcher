@@ -10,6 +10,8 @@ pub mod console;
 pub mod instance;
 pub mod logging;
 pub mod model;
+pub mod notify;
 pub mod paths;
+pub mod power;
 pub mod service;
 pub mod store;
