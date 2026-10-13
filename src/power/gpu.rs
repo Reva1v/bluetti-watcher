@@ -1,5 +1,6 @@
 //! Лимит мощности GPU NVIDIA (research.md R3). Сервис без прав пишет уровень в `gpu-request` и запускает
-//! элевированную задачу `BluettiWatcherGpu`; та выполняет `gpu-apply` и ставит ватты через NVML.
+//! элевированную задачу `BluettiWatcherGpu`; та выполняет `gpu-apply`: останавливает/запускает службы реплея
+//! (`services`) и ставит ватты через NVML.
 
 use crate::config::Eco;
 use crate::model::EcoLevel;
@@ -68,6 +69,18 @@ pub fn apply_from_request(cfg: &Eco) -> Result<u32, GpuError> {
         std::fs::read_to_string(&path).map_err(|e| GpuError::Request(format!("{}: {e}", path.display())))?;
     let level =
         parse_level(&text).ok_or_else(|| GpuError::Request(format!("неверный уровень «{}»", text.trim())))?;
+
+    // Сначала службы (Windhawk, затем реплей NVIDIA): их не должна блокировать ошибка или отсутствие NVML.
+    #[cfg(windows)]
+    if cfg.stop_replay {
+        let state = Paths::shared_dir().join("services-stopped");
+        for line in super::services::apply(level, &state) {
+            tracing::info!("{line}");
+        }
+    }
+    if !cfg.gpu {
+        return Ok(0);
+    }
 
     let nvml = Nvml::init().map_err(|e| match e {
         NvmlError::LibloadingError(_) | NvmlError::LibraryNotFound | NvmlError::DriverNotLoaded => {

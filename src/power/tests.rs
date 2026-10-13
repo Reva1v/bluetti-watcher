@@ -259,7 +259,13 @@ fn unreadable_active_scheme_skips_scheme_but_not_overlay() {
 
 #[test]
 fn disabled_parts_are_not_touched() {
-    let cfg = Eco { power_scheme: false, efficiency_overlay: false, gpu: false, ..Config::default().eco };
+    let cfg = Eco {
+        power_scheme: false,
+        efficiency_overlay: false,
+        gpu: false,
+        stop_replay: false,
+        ..Config::default().eco
+    };
     let mut pc = PowerControl::new(Fake::new(), cfg, None, false);
     let (r, parts) = pc.apply(EcoLevel::Deep, None);
     assert_eq!(r, None);

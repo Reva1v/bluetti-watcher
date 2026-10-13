@@ -52,6 +52,8 @@ pub struct Eco {
     pub gpu: bool,
     pub gpu_pct: u8,
     pub deep_gpu_pct: u8,
+    /// Остановить Windhawk и контейнер NVIDIA (Instant Replay) на время eco.
+    pub stop_replay: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -108,6 +110,7 @@ impl Default for Config {
                 gpu: true,
                 gpu_pct: 70,
                 deep_gpu_pct: 0,
+                stop_replay: true,
             },
             guards: Guards { soc_rate_per_min: 5.0, soc_jump_floor: 3, max_gap_sec: 600 },
             dtek: Dtek::default(),
@@ -210,6 +213,7 @@ pub fn parse(text: &str) -> Loaded {
             gpu: r.boolean(Some("eco"), "gpu", d.eco.gpu),
             gpu_pct: r.int(Some("eco"), "gpu_pct", d.eco.gpu_pct as i64, 0, 100) as u8,
             deep_gpu_pct: r.int(Some("eco"), "deep_gpu_pct", d.eco.deep_gpu_pct as i64, 0, 100) as u8,
+            stop_replay: r.boolean(Some("eco"), "stop_replay", d.eco.stop_replay),
         },
         guards: Guards {
             soc_rate_per_min: r.float(

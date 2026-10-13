@@ -4,6 +4,7 @@
 pub mod gpu;
 pub mod hibernate;
 pub mod scheme;
+pub mod services;
 
 use serde::{Deserialize, Serialize};
 
@@ -109,6 +110,11 @@ impl<B: PowerBackend> PowerControl<B> {
         Self { backend, cfg, eco_scheme: eco_scheme.map(|g| g.to_ascii_lowercase()), dry_run }
     }
 
+    /// Нужна ли элевированная задача: лимит GPU и/или остановка реплея NVIDIA.
+    fn elevated(&self) -> bool {
+        self.cfg.gpu || self.cfg.stop_replay
+    }
+
     pub fn backend(&self) -> &B {
         &self.backend
     }
@@ -154,7 +160,7 @@ impl<B: PowerBackend> PowerControl<B> {
                 if o.eq_ignore_ascii_case(OVERLAY_BEST_EFFICIENCY) { OVERLAY_NONE.to_string() } else { o }
             });
         }
-        if self.cfg.gpu && r.gpu_was.is_none() && self.backend.gpu_task_installed() {
+        if self.elevated() && r.gpu_was.is_none() && self.backend.gpu_task_installed() {
             r.gpu_was = Some("normal".into());
         }
         r
@@ -199,18 +205,19 @@ impl<B: PowerBackend> PowerControl<B> {
             });
         }
 
-        if self.cfg.gpu {
+        if self.elevated() {
             if !self.backend.gpu_task_installed() {
                 out.push(PartResult::fail(
                     "gpu",
-                    "задача BluettiWatcherGpu не установлена — GPU не меняется",
+                    "задача BluettiWatcherGpu не установлена — GPU и реплей NVIDIA не меняются",
                 ));
             } else {
                 let r = if dry { Ok(()) } else { self.backend.gpu_request(level) };
                 out.push(match r {
-                    Ok(()) => {
-                        PartResult::ok("gpu", tag(format!("запрошен лимит GPU «{}»", gpu::level_word(level))))
-                    }
+                    Ok(()) => PartResult::ok(
+                        "gpu",
+                        tag(format!("запрошены лимит GPU и реплей NVIDIA «{}»", gpu::level_word(level))),
+                    ),
                     Err(e) => PartResult::fail("gpu", e),
                 });
             }
