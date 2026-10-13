@@ -65,11 +65,10 @@ fn main() -> ExitCode {
     };
     let paths = paths::Paths::from_env();
     match cli.command.unwrap_or(Command::Run { dry_run: false }) {
-        Command::Run { .. } => {
+        Command::Run { dry_run } => {
             let _ = paths.ensure();
             logging::init(Some(&paths.logs_dir()), has_console, false);
-            tracing::info!("сервис ещё не реализован");
-            ExitCode::SUCCESS
+            block_on(cmd_run(&paths, dry_run))
         }
         Command::Scan => {
             logging::init(None, true, false);
@@ -95,6 +94,37 @@ fn block_on<F: std::future::Future<Output = ExitCode>>(f: F) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+async fn cmd_run(paths: &paths::Paths, dry_run: bool) -> ExitCode {
+    let Some(_guard) = bluetti_watcher::instance::acquire() else {
+        tracing::info!("сервис уже запущен");
+        return ExitCode::from(3);
+    };
+    let loaded = config::load(&paths.config());
+    for w in &loaded.warnings {
+        tracing::warn!("config: {w}");
+    }
+    let mut cfg = loaded.config;
+    cfg.dry_run |= dry_run;
+    let store = match bluetti_watcher::store::Store::open(&paths.db()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("не открыть {}: {e}", paths.db().display());
+            return ExitCode::FAILURE;
+        }
+    };
+    tracing::info!(
+        "сервис запущен: станция {}, опрос {} с{}",
+        cfg.mac.map_or("не задана".into(), config::format_mac),
+        cfg.poll_sec,
+        if cfg.dry_run { ", dry run" } else { "" }
+    );
+    let reader = bluetti_watcher::service::WinRtReader::new(cfg.mac);
+    let mut svc =
+        bluetti_watcher::service::Service::new(cfg, store, reader, bluetti_watcher::clock::SystemClock);
+    svc.run().await;
+    ExitCode::SUCCESS
 }
 
 async fn cmd_scan() -> ExitCode {

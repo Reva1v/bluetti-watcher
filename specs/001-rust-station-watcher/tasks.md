@@ -65,9 +65,9 @@ description: "Task list for 001-rust-station-watcher"
 - [X] T019 [US1] `src/ble/scan.rs` + команда `scan` в `src/main.rs`: `BluetoothLEAdvertisementWatcher` 10 с, фильтр имён по регэкспу из bluetti-bt-lib (`^(AC180P|AC180|AC2A|…)\d+$`), печать имя / адрес / RSSI
 - [X] T020 [US1] Команда `read-once [--mac] [--trace]` в `src/main.rs`: одно чтение, печать `encryption: yes|no` и полей; `--trace` печатает каждый кадр hex (без ключей); exit 1 при пропуске с причиной
 - [ ] T021 [US1] **СТОП-ТОЧКА ВЛАДЕЛЬЦА**: собрать release, владелец выполняет quickstart.md §1 у своей AC180P; результат (успех, шифрование, совпадение цифр с экраном, прошивка) записать в spec.md → Assumptions. При неудаче — разбор `--trace` до перехода к T022
-- [ ] T022 [US1] `src/store.rs`: схема `readings`, `outages`, `events`, `meta` строго по data-model.md (`ts INTEGER PK`, `soc INTEGER NULL` 0–100, `status TEXT` одно из `accepted|rejected|rebased|miss`, …), WAL, миграция по `user_version`; `insert_reading`, `insert_event`, `get_meta/set_meta` (JSON), чистка записей старше 365 дней раз в сутки; unit-тесты на временной БД
-- [ ] T023 [US1] `src/instance.rs`: именованный мьютекс `Local\BluettiWatcher`; второй `run` → exit 3 (FR-008)
-- [ ] T024 [US1] `src/service.rs` + команда `run [--dry-run]`: цикл каждые `poll_sec` (по умолчанию 60): `read_station` → запись показания или пропуска с причиной (на этом этапе все полные показания `accepted`, решения подключаются в US4) → событие `service-start` при запуске; ошибки чтения не роняют цикл (US1 сценарий 3); подсказка шифрования из `meta.encryption`
+- [X] T022 [US1] `src/store.rs`: схема `readings`, `outages`, `events`, `meta` строго по data-model.md (`ts INTEGER PK`, `soc INTEGER NULL` 0–100, `status TEXT` одно из `accepted|rejected|rebased|miss`, …), WAL, миграция по `user_version`; `insert_reading`, `insert_event`, `get_meta/set_meta` (JSON), чистка записей старше 365 дней раз в сутки; unit-тесты на временной БД
+- [X] T023 [US1] `src/instance.rs`: именованный мьютекс `Local\BluettiWatcher`; второй `run` → exit 3 (FR-008)
+- [X] T024 [US1] `src/service.rs` + команда `run [--dry-run]`: цикл каждые `poll_sec` (по умолчанию 60): `read_station` → запись показания или пропуска с причиной (на этом этапе все полные показания `accepted`, решения подключаются в US4) → событие `service-start` при запуске; ошибки чтения не роняют цикл (US1 сценарий 3); подсказка шифрования из `meta.encryption`
 
 **Checkpoint**: `bluetti-watcher run` пишет показания в фоне; пропуски видны с причиной
 
