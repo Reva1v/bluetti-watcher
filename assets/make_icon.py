@@ -1,4 +1,4 @@
-"""Генератор assets/icon.ico (16/24/32/48/64/256): оранжевая батарея с молнией на тёмном скруглённом квадрате.
+"""Генератор assets/icon.ico (16/24/32/48/64/256) и assets/icon-128.png (README): оранжевая батарея с молнией на тёмном скруглённом квадрате.
 
 Запуск из корня репозитория: python -I assets/make_icon.py  (нужен Pillow). Результат коммитится,
 при сборке Python не нужен.
@@ -48,6 +48,8 @@ def main() -> int:
     out = os.path.join(here, "icon.ico")
     images = [draw(s) for s in SIZES]
     images[-1].save(out, format="ICO", sizes=[(s, s) for s in SIZES], append_images=images[:-1])
+    # PNG для шапки README (GitHub не показывает .ico).
+    draw(128).save(os.path.join(here, "icon-128.png"))
     if len(sys.argv) > 1:  # каталог для PNG-превью
         for img, s in zip(images, SIZES):
             img.resize((256, 256), Image.NEAREST).save(os.path.join(sys.argv[1], f"icon{s}.png"))

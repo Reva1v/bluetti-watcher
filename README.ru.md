@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/icon-128.png" width="96" height="96" alt="Bluetti Watcher">
+
 # Bluetti Watcher
 
 **Следит за станцией BLUETTI AC180P в фоне и защищает ПК при отключении света: сначала eco-режим, а перед разрядом — гибернация.**

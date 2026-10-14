@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/icon-128.png" width="96" height="96" alt="Bluetti Watcher">
+
 # Bluetti Watcher
 
 **Watches a BLUETTI AC180P power station in the background and protects your PC during power cuts: eco mode first, hibernation before the battery runs out.**
