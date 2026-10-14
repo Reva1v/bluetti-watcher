@@ -2,9 +2,11 @@
 
 # Bluetti Watcher
 
-**Следит за станцией BLUETTI AC180P в фоне и защищает ПК при отключении света: eco-режим, а перед разрядом — гибернация.**
+**Watches a BLUETTI AC180P power station in the background and protects your PC during power cuts: eco mode first, hibernation before the battery runs out.**
 
-Один exe на Rust: раз в минуту читает станцию по Bluetooth LE, без окна и значка в трее; графики — по ярлыку.
+A single Rust exe that reads the station over Bluetooth LE once a minute — no window, no tray icon; charts open from a shortcut.
+
+**English** · [Українська](README.uk.md) · [Русский](README.ru.md)
 
 ![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?logo=windows&logoColor=white)
 ![Rust](https://img.shields.io/badge/Rust-2024-B7410E?logo=rust&logoColor=white)
@@ -15,71 +17,87 @@
 
 ---
 
-## Возможности
+<p align="center"><img src="docs/images/dashboard.png" width="680" alt="Dashboard: charge 100 %, time left if power goes out, PC mode buttons, power tiles and the charge history with an outage band"></p>
+
+<p align="center"><img src="docs/images/history-dtek.png" width="680" alt="Power chart and the DTEK outage schedule: a 24-hour grid with planned outages and the current hour highlighted"></p>
+
+## Features
 
 | | |
 |---|---|
-| 🔋 **Чтение станции по Bluetooth** | Раз в минуту: заряд, вход и выход AC/DC, напряжение сети. Только чтение — настройки станции программа не меняет никогда. |
-| 🌙 **Невидимо в фоне** | Без окна, консоли и трея; запускается при входе в Windows без прав администратора. В простое — около 0 % CPU и единицы мегабайт памяти. |
-| 📈 **Дашборд по ярлыку** | Отдельное окно: заряд, сколько осталось работать, мощности, графики за 6 ч / 24 ч / 7 д / 30 д, отключения и события. |
-| ⚡ **Eco при отключении света** | Через 3 минуты без сети: своя схема питания «Bluetti Eco» (CPU до 80 %, монитор гаснет через 3 мин, режим энергоэффективности) и лимит мощности видеокарты NVIDIA. На 20 % — глубокий eco. |
-| 🛌 **Гибернация до разряда** | Уведомление на 7 %, гибернация на 5 % — только после свежего подтверждающего показания. При быстром разряде пороги поднимаются заранее. |
-| 🎛 **Ручной режим** | Кнопки «Авто», «Eco», «Максимум» на дашборде. |
+| 🔋 **Reads the station over Bluetooth** | Once a minute: charge, AC/DC input and output, grid voltage. Read-only — the program never changes a station setting. |
+| 🌙 **Invisible in the background** | No window, console or tray icon; starts at Windows sign-in without admin rights. Idles at ~0 % CPU and a few megabytes of RAM. |
+| 📈 **Dashboard from a shortcut** | Its own frameless dark window: charge, time left, power, charts for 6 h / 24 h / 7 d / 30 d, outages and events. |
+| ⚡ **Eco during a power cut** | After 3 minutes without mains: the «Bluetti Eco» power plan (CPU up to 80 %, display off after 3 min, best power efficiency), an NVIDIA power limit, Windhawk and NVIDIA Instant Replay stopped. Deep eco at 20 %. |
+| 🛌 **Hibernation before empty** | A notification at 7 %, hibernation at 5 % — only after a fresh reading confirms it. With a fast drain the thresholds move up in advance. |
+| 🗓 **DTEK outage schedule** | Planned outages for today and tomorrow (Kyiv), as an hour grid like the DTEK app. The queue is picked from real outages the station sees. Display only. |
 
-## Как это реагирует
+## How it reacts
 
-| Когда | Что происходит |
+| When | What happens |
 |---|---|
-| Сети нет 3 минуты | Начинается отключение, включается eco |
-| Заряд 20 % | Глубокий eco: CPU до 50 %, GPU до минимального лимита, уведомление |
-| Заряд 10 % | Уведомление «сохраните работу» |
-| Заряд 7 % | Уведомление: ПК уйдёт в гибернацию примерно через N минут |
-| Заряд 5 % | Гибернация, если свежее показание это подтверждает |
-| Сеть вернулась на 3 минуты | Прежняя схема питания и лимит GPU |
+| No mains for 3 minutes | The outage starts, eco turns on |
+| Charge 20 % | Deep eco: CPU up to 50 %, GPU at its minimum limit, a notification |
+| Charge 10 % | Notification «save your work» |
+| Charge 7 % | Notification: the PC will hibernate in about N minutes |
+| Charge 5 % | Hibernation, if a fresh reading confirms it |
+| Mains back for 3 minutes | The previous power plan, GPU limit and services come back |
 
-Уровень срабатывает только после двух согласных показаний. Скачок заряда (сбой или перекалибровка станции) отвергается,
-а если низкий заряд держится — гибернация ждёт 10 минут подтверждения. Все пороги настраиваются.
+A level fires only after two agreeing readings. A charge jump (a glitch or the station recalibrating) is rejected, and if
+the low charge holds, hibernation waits for 10 minutes of confirmation. All thresholds are configurable.
 
-## Установка
+**PC mode buttons** (the UI is in Russian): «Авто» (Auto) — eco only during an outage; «Eco» — eco now, even on mains;
+«Максимум» (Max) — no saving until the next mains change or «Авто». Low-charge notifications and hibernation work in every mode; only the empty file `no-hibernate`
+turns hibernation off.
 
-Готовых сборок пока нет — собирается из исходников (см. ниже), затем:
+**Time left** uses the average load, not the momentary one: the all-time average for «if power goes out», the average
+since the outage began during a cut (or the measured discharge rate once there is enough data).
+
+## Installation
+
+The latest build is on the **[Releases](https://github.com/Reva1v/bluetti-watcher/releases)** page; you can also build
+from source (below). Then, in PowerShell from the folder with the exe:
 
 ```powershell
-.\target\release\bluetti-watcher.exe scan | Out-Host                            # найти станцию: имя, адрес, сигнал
-.\target\release\bluetti-watcher.exe install --elevated-setup | Out-Host        # установить (станция найдётся сама)
-.\target\release\bluetti-watcher.exe install --mac AA:BB:CC:DD:EE:FF | Out-Host # или указать адрес явно
+.\bluetti-watcher.exe scan | Out-Host                             # find the station: name, address, signal
+.\bluetti-watcher.exe install --elevated-setup | Out-Host         # install (the station is found by itself)
+.\bluetti-watcher.exe install --mac AA:BB:CC:DD:EE:FF | Out-Host  # or give the address explicitly
 ```
 
-`| Out-Host` нужен потому, что exe собран без консоли: так PowerShell дождётся вывода команды.
+`| Out-Host` is needed because the exe has no console: this way PowerShell waits for the command's output.
 
-`install` делает:
-- копирует exe в `%LOCALAPPDATA%\bluetti-watcher\bin\` и пишет `config.toml` с адресом станции;
-- создаёт схему питания «Bluetti Eco» (ваши схемы не меняются);
-- регистрирует задачу планировщика `BluettiWatcher` — запуск при входе, без прав администратора, перезапуск при сбое;
-- создаёт ярлыки «Bluetti Watcher» на Рабочем столе и в меню «Пуск»;
-- запускает сервис.
+`install`:
+- copies the exe to `%LOCALAPPDATA%\bluetti-watcher\bin\` and writes `config.toml` with the station address;
+- creates the «Bluetti Eco» power plan (your own plans are not changed);
+- registers the `BluettiWatcher` scheduled task: starts at sign-in, no admin rights, restarts on failure;
+- creates «Bluetti Watcher» shortcuts on the Desktop and in the Start menu;
+- starts the service.
 
-`--elevated-setup` один раз запрашивает UAC: включает гибернацию Windows (`powercfg /h on`) и создаёт задачу
-`BluettiWatcherGpu` для лимита мощности видеокарты. Без него eco работает без GPU, а дашборд предупредит, если
-гибернация выключена.
+`--elevated-setup` asks for UAC once: turns Windows hibernation on (`powercfg /h on`) and creates the
+`BluettiWatcherGpu` task that sets the GPU limit and stops/starts Windhawk and the NVIDIA container. Without it eco works
+without those parts, and the dashboard warns you if hibernation is off.
 
-## Использование
+The exe is not code-signed, so Windows may warn on first start. Check the SHA-256 of the release zip against its
+`.sha256` file.
 
-- **Дашборд** — ярлык «Bluetti Watcher». Закрытие окна сервис не останавливает. Если сервис не запущен, ярлык запустит его.
-- **Состояние одной строкой** — `bluetti-watcher status | Out-Host`.
-- **Проверка связи** — `bluetti-watcher read-once --trace | Out-Host` печатает поля и кадры протокола.
-- **Выключатель гибернации** — пустой файл `%LOCALAPPDATA%\bluetti-watcher\no-hibernate`; проверяется на каждом цикле.
-- **Пробный режим** — `dry_run = true` в `config.toml` (или `run --dry-run`): все действия над ПК только пишутся в лог.
-- **Удаление** — `bluetti-watcher uninstall | Out-Host` возвращает схему питания и убирает задачи, ярлыки и схему
-  «Bluetti Eco»; данные остаются. `--purge` удаляет и их.
+## Usage
 
-## Настройка
+- **Dashboard** — the «Bluetti Watcher» shortcut. Closing the window does not stop the service; if the service is not
+  running, the shortcut starts it.
+- **One-line status** — `bluetti-watcher status | Out-Host`.
+- **Link check** — `bluetti-watcher read-once --trace | Out-Host` prints the fields and the protocol frames.
+- **Hibernation kill switch** — an empty file `%LOCALAPPDATA%\bluetti-watcher\no-hibernate`; checked on every cycle.
+- **Dry run** — `dry_run = true` in `config.toml` (or `run --dry-run`): every action on the PC only goes to the log.
+- **Uninstall** — `bluetti-watcher uninstall | Out-Host` restores the power plan and removes the tasks, shortcuts and the
+  «Bluetti Eco» plan; data stays. `--purge` removes it too.
 
-`%LOCALAPPDATA%\bluetti-watcher\config.toml`. Обязателен только `mac`; остальное — значения по умолчанию:
+## Configuration
+
+`%LOCALAPPDATA%\bluetti-watcher\config.toml`. Only `mac` is required; everything else has defaults:
 
 ```toml
 mac = "AA:BB:CC:DD:EE:FF"
-port = 8765                 # дашборд на 127.0.0.1
+port = 8765                 # dashboard on 127.0.0.1
 poll_sec = 60
 dry_run = false
 
@@ -88,11 +106,11 @@ capacity_wh = 1440          # AC180P
 efficiency = 0.85
 
 [mains]
-lost_sec = 180              # сколько ждать без сети до eco
+lost_sec = 180              # how long without mains before eco
 back_sec = 180
 
 [levels]
-low = 20                    # глубокий eco
+low = 20                    # deep eco
 critical = 10
 warn = 7
 hibernate = 5
@@ -104,86 +122,100 @@ deep_cpu_max_pct = 50
 efficiency_overlay = true
 monitor_off_sec = 180
 gpu = true
-gpu_pct = 70                # от номинала, не ниже минимального лимита карты
-deep_gpu_pct = 0            # 0 = минимальный лимит
+gpu_pct = 70                # of the default limit, never below the card's minimum
+deep_gpu_pct = 0            # 0 = the card's minimum
+stop_replay = true          # stop Windhawk, then the NVIDIA container (Instant Replay)
+
+[dtek]
+enabled = false
+region = "kyiv"             # dataset kyiv.json
+address = ""                # caption on the card only
+queues = []                 # candidate queues, e.g. ["GPV9.1", "GPV21.1"]
 ```
 
-Полный список ключей и пределы — [contracts/cli-config.md](specs/001-rust-station-watcher/contracts/cli-config.md).
+Every key and its limits: [contracts/cli-config.md](specs/001-rust-station-watcher/contracts/cli-config.md); the
+schedule: [specs/002-dtek-schedule](specs/002-dtek-schedule/spec.md).
 
-## Безопасность
+## Safety and privacy
 
-- К станции уходят только команды чтения Modbus (0x03) и шаги защищённого соединения; тест проверяет каждый исходящий кадр.
-- HTTP слушает только `127.0.0.1` и отклоняет запросы с чужим `Host`; смена режима требует заголовка, который другие
-  сайты отправить не могут.
-- Данные не покидают ПК: облака BLUETTI и внешних сервисов нет.
+- Only Modbus read commands (0x03) and secure-connection handshake steps go to the station; a test checks every outgoing
+  frame.
+- HTTP listens on `127.0.0.1` only and rejects a foreign `Host`; changing the mode needs a header other sites cannot send.
+- The only outbound request is an HTTPS GET of the public dataset
+  [Baskerville42/outage-data-ua](https://github.com/Baskerville42/outage-data-ua) every 30 minutes, and only with
+  `[dtek] enabled = true`. Your address never leaves the PC; there is no BLUETTI cloud.
 
-## Сборка из исходников
+## Building from source
 
-Нужны Windows 10/11 x64 с Bluetooth LE и [Rust](https://rustup.rs/) stable (1.97+).
+Windows 10/11 x64 with Bluetooth LE and [Rust](https://rustup.rs/) stable (1.97+).
 
 ```powershell
 cargo build --release      # target\release\bluetti-watcher.exe
-cargo test                 # протокол, решения, хранилище, API
+cargo test                 # protocol, decisions, storage, API, schedule
 ```
 
-## Архитектура
+## Architecture
 
-Сервис однопоточный (tokio current_thread): цикл чтения раз в минуту, решения — чистая функция без I/O,
-действия над ПК — через трейты, которые в тестах подменяются фейками.
+A single-threaded service (tokio current_thread): a reading loop once a minute, decisions as a pure function without
+I/O, actions on the PC through traits that tests replace with fakes. The schedule refreshes in its own task.
 
 ```mermaid
 flowchart LR
     ST[AC180P] -- BLE GATT<br/>Modbus 0x03 --> BLE[ble<br/>WinRT]
-    BLE --> SVC[service<br/>цикл 60 с]
-    SVC --> DEC[decision<br/>сеть · уровни · гибернация]
+    BLE --> SVC[service<br/>60 s loop]
+    SVC --> DEC[decision<br/>mains · levels · hibernate]
     DEC --> SVC
-    SVC --> PWR[power<br/>схема · GPU · гибернация]
+    SVC --> PWR[power<br/>plan · GPU · services · hibernate]
     SVC --> DB[(SQLite<br/>station.db)]
+    GH[outage-data-ua<br/>kyiv.json] -- HTTPS 30 min --> DT[dtek]
     SVC --> HTTP[http<br/>127.0.0.1 · SSE]
-    HTTP --> WIN[open<br/>окно WebView2]
+    DT --> HTTP
+    HTTP --> WIN[open<br/>WebView2 window]
 ```
 
-| Слой | Технологии |
+| Layer | Technologies |
 |---|---|
-| Bluetooth и Windows API | `windows` (WinRT GATT, powrprof, Task Scheduler, Shell) |
-| Протокол | Modbus RTU, шифрование BLUETTI IoT v2 на RustCrypto (`p256`, `aes`, `cbc`, `md-5`) |
-| Хранилище | `rusqlite` (SQLite, bundled) |
-| API и дашборд | `axum`, SSE, HTML/CSS/JS без фреймворков, графики uPlot |
-| Окно | `wry` + `tao` (WebView2) |
-| GPU и уведомления | `nvml-wrapper`, `tauri-winrt-notification` |
+| Bluetooth and Windows API | `windows` (WinRT GATT and HTTP, powrprof, Task Scheduler, services, Shell, DWM) |
+| Protocol | Modbus RTU, BLUETTI IoT v2 encryption on RustCrypto (`p256`, `aes`, `cbc`, `md-5`) |
+| Storage | `rusqlite` (SQLite, bundled) |
+| API and dashboard | `axum`, SSE, framework-free HTML/CSS/JS, uPlot charts |
+| Window | `wry` + `tao` (WebView2) |
+| GPU and notifications | `nvml-wrapper`, `tauri-winrt-notification` |
 
-## Структура проекта
+## Project layout
 
 ```
-src/ble/           чтение станции: WinRT-транспорт, Modbus, шифрование, карта регистров AC180P, сканирование
-src/decision/      решения: проверки показаний, сеть и отключения, уровни и гибернация
-src/power/         eco: схема «Bluetti Eco», оверлей, лимит GPU, гибернация
-src/http/          API, SSE и встроенный дашборд (web/)
-src/service.rs     цикл сервиса
+src/ble/           station reading: WinRT transport, Modbus, encryption, AC180P registers, scan
+src/decision/      decisions: reading checks, mains and outages, levels and hibernation
+src/power/         eco: «Bluetti Eco» plan, overlay, GPU limit, services, hibernation
+src/dtek/          DTEK schedule: dataset fetch, parsing, outage windows, queue selection
+src/http/          API, SSE and the embedded dashboard (web/)
+src/service.rs     service loop
 src/install.rs     install / uninstall / status
-src/window.rs      окно дашборда
-tests/             протокол против фейковой станции, сценарии решений
-specs/             спецификация, план, задачи (Spec Kit)
-design/            макеты дашборда
-assets/            иконка
+src/window.rs      dashboard window
+tests/             protocol against a fake station, decision scenarios, dataset fixture
+specs/             specifications, plans, tasks (Spec Kit; in Russian)
+design/            dashboard mockups
+docs/images/       README screenshots
 ```
 
-## Разработка
+## Development
 
 ```powershell
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                                   # 138 тестов
-cargo test --lib -- --ignored overlay_spike  # проверка оверлея питания на этом ПК (обратимо)
+cargo test                                   # 167 tests
+cargo test --lib -- --ignored real_fetch     # one real request to the DTEK dataset
 ```
 
-Фичи ведутся по Spec Kit: [`specs/001-rust-station-watcher/`](specs/001-rust-station-watcher/) — спецификация,
-план, исследование протокола, контракты API и сценарии проверки ([quickstart.md](specs/001-rust-station-watcher/quickstart.md)).
+Features follow Spec Kit: [`specs/`](specs/) holds the specifications, plans, protocol research, API contracts and
+validation scenarios (in Russian).
 
-## Происхождение и лицензия
+## Origin and license
 
-Переписано на Rust с [vitaliy-shatskiy/bluetti-watcher](https://github.com/vitaliy-shatskiy/bluetti-watcher)
-(C# + Python): правила решений перенесены оттуда, облачный источник, модуль ДТЭК и флаг-файл убраны. Протокол
-станции портирован с [bluetti-bt-lib](https://pypi.org/project/bluetti-bt-lib/). Лицензия — [MIT](LICENSE).
+Rewritten in Rust from [vitaliy-shatskiy/bluetti-watcher](https://github.com/vitaliy-shatskiy/bluetti-watcher)
+(C# + Python): the decision rules come from there; the cloud source and the flag file were dropped, the DTEK module was
+redone on the public dataset. The station protocol is ported from
+[bluetti-bt-lib](https://pypi.org/project/bluetti-bt-lib/). License — [MIT](LICENSE).
 
-Проект независимый и не связан с BLUETTI.
+An independent project, not affiliated with BLUETTI or DTEK.
