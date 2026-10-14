@@ -216,6 +216,10 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .outages { flex: 999 1 560px; gap: 12px; }
 .events { flex: 1 1 320px; gap: 12px; }
 .scroll-x { overflow-x: auto; }
+/* Длинные списки не растягивают карточки: своя прокрутка, шапка таблицы остаётся на месте. */
+.outages .scroll-x { max-height: 420px; overflow-y: auto; }
+.outages thead th { position: sticky; top: 0; background: var(--card); z-index: 1; }
+#ev-list { max-height: 420px; overflow-y: auto; padding-right: 4px; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; min-width: 520px; }
 th { color: var(--dim); text-align: left; font-weight: 500; padding: 8px; }
 td { padding: 10px 8px; }
