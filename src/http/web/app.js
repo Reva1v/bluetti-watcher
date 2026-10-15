@@ -211,9 +211,12 @@
 
   function renderMode(n, nowMs) {
     const active = S.pending || n.manual;
+    // В «Авто» полупрозрачно подсвечен режим, который сейчас фактически действует.
+    const effective = active === 'auto' || !active ? (n.eco === 'eco' || n.eco === 'deep' ? 'eco' : 'max') : '';
     for (const b of document.querySelectorAll('.seg button')) {
       const on = String(b.dataset.mode === active);
       if (b.getAttribute('aria-pressed') !== on) b.setAttribute('aria-pressed', on);
+      b.classList.toggle('effective', b.dataset.mode === effective);
     }
     let title, detail;
     if (active === 'eco') {
