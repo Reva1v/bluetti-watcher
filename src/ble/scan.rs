@@ -21,6 +21,43 @@ pub struct Found {
     pub rssi: i16,
 }
 
+/// Ждать рекламу устройства с адресом `address` не дольше `max`. После сна Windows забывает неспаренную
+/// станцию, и `FromBluetoothAddressAsync` сразу отказывает, пока устройство снова не попадётся в эфире.
+pub async fn seen(address: u64, max: Duration) -> windows::core::Result<bool> {
+    let hit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watcher = BluetoothLEAdvertisementWatcher::new()?;
+    watcher.SetScanningMode(BluetoothLEScanningMode::Active)?;
+    let sink = hit.clone();
+    let token = watcher.Received(&TypedEventHandler::new(
+        move |_: Ref<BluetoothLEAdvertisementWatcher>,
+              args: Ref<BluetoothLEAdvertisementReceivedEventArgs>| {
+            if let Some(a) = args.as_ref()
+                && a.BluetoothAddress()? == address
+            {
+                sink.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            Ok(())
+        },
+    ))?;
+    // Скан останавливается и при брошенном future (таймаут чтения), иначе эфир слушался бы дальше.
+    let _stop = StopOnDrop(&watcher, token);
+    watcher.Start()?;
+    let deadline = tokio::time::Instant::now() + max;
+    while !hit.load(std::sync::atomic::Ordering::Relaxed) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    Ok(hit.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+struct StopOnDrop<'a>(&'a BluetoothLEAdvertisementWatcher, i64);
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.Stop();
+        let _ = self.0.RemoveReceived(self.1);
+    }
+}
+
 pub async fn scan(duration: Duration) -> windows::core::Result<Vec<Found>> {
     let re = Regex::new(NAME_PATTERN).expect("regex");
     let found: Arc<Mutex<BTreeMap<u64, Found>>> = Arc::default();

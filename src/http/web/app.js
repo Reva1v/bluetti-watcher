@@ -13,7 +13,7 @@
   const SRC = { rate: 'По скорости разряда', learned: 'По обученному КПД', capacity: 'По ёмкости станции' };
 
   const S = {
-    now: null, outages: [], events: [], range: '6h', hist: null, histAt: 0, xr: [0, 1],
+    now: null, outages: [], events: [], range: '6h', hist: null, histAt: 0, xr: [0, 1], gaps: [],
     pending: null, pendingAt: 0, modeErr: '', conn: true,
   };
 
@@ -263,6 +263,29 @@
     }
   }
 
+  // ---------- проверка подключения (POST /api/check) ----------
+  async function checkNow() {
+    const btn = $('check-btn');
+    btn.disabled = true;
+    setText('check-btn', 'Проверяю…');
+    let res;
+    try {
+      const r = await fetch('/api/check', { method: 'POST', headers: { 'X-Bluetti-Watcher': '1' } });
+      if (!r.ok) throw new Error((await r.text().catch(() => '')) || 'HTTP ' + r.status);
+      const v = await r.json();
+      const ad = v.advertising === true ? ' Станция видна в эфире Bluetooth.' : '';
+      res = { ok: v.ok, title: v.title + '.', detail: v.detail + (v.ok ? '' : ad) };
+    } catch (e) {
+      res = { ok: false, title: 'Проверка не выполнена.', detail: e instanceof TypeError ? 'Нет связи с сервисом.' : e.message };
+    }
+    btn.disabled = false;
+    setText('check-btn', 'Проверить подключение сейчас');
+    $('check-res').className = 'banner ' + (res.ok ? 'b-green' : 'b-red');
+    setText('check-title', res.title);
+    setText('check-detail', res.detail);
+    show('check-res', true);
+  }
+
   // ---------- lists ----------
   function renderOutages() {
     const body = $('out-body');
@@ -286,7 +309,7 @@
 
   function evClass(k) {
     if (/failed|refused|critical/.test(k)) return 'ev-bad';
-    if (/^(outage-start|eco-on|eco-deep|level-low|hibernate)/.test(k)) return 'ev-warn';
+    if (/^(outage-start|eco-on|eco-deep|level-low|hibernate|dtek-warn)/.test(k)) return 'ev-warn';
     return '';
   }
 
@@ -327,6 +350,62 @@
     ctx.restore();
   }
 
+  // Штриховка «нет данных»: сервис стоял, ПК спал или был выключен, станция молчала.
+  let hatch = null;
+  function hatchPattern(ctx) {
+    if (hatch) return hatch;
+    const px = uPlot.pxRatio, n = Math.round(8 * px);
+    const c = document.createElement('canvas');
+    c.width = c.height = n;
+    const g = c.getContext('2d');
+    g.strokeStyle = '#4A4A4A';
+    g.lineWidth = px;
+    g.beginPath(); g.moveTo(0, n); g.lineTo(n, 0); g.moveTo(-n / 2, n / 2); g.lineTo(n / 2, -n / 2);
+    g.moveTo(n / 2, n * 1.5); g.lineTo(n * 1.5, n / 2); g.stroke();
+    hatch = ctx.createPattern(c, 'repeat');
+    return hatch;
+  }
+
+  function drawGaps(u) {
+    if (!S.gaps.length) return;
+    const { left, top, width, height } = u.bbox, ctx = u.ctx;
+    ctx.save();
+    for (const [a, b] of S.gaps) {
+      const x0 = Math.max(left, u.valToPos(a, 'x', true));
+      const x1 = Math.min(left + width, u.valToPos(b, 'x', true));
+      if (x1 <= x0) continue;
+      ctx.fillStyle = 'rgba(128,128,128,0.08)';
+      ctx.fillRect(x0, top, x1 - x0, height);
+      ctx.fillStyle = hatchPattern(ctx);
+      ctx.fillRect(x0, top, x1 - x0, height);
+    }
+    ctx.restore();
+  }
+
+  // Пропуски: соседние точки дальше порога друг от друга и от последней точки до «сейчас». Порог — не меньше
+  // 10 минут и трёх шагов истории; там же рвётся линия графика. Третий элемент — пропуск начался до диапазона.
+  function findGaps(points, step, from, to) {
+    const limit = Math.max(600, 3 * step), gaps = [];
+    if (!points.length) return gaps;
+    if (points[0].t - from > limit) gaps.push([from, points[0].t, true]);
+    for (let i = 1; i < points.length; i++) {
+      const a = points[i - 1].t + step, b = points[i].t;
+      if (b - points[i - 1].t > limit) gaps.push([a, b, false]);
+    }
+    const last = points[points.length - 1].t;
+    if (to - last > limit) gaps.push([last + step, to, false]);
+    return gaps;
+  }
+
+  function gapText([a, b, before]) {
+    const da = new Date(a * 1000), db = new Date(b * 1000);
+    const short = S.range === '6h' || S.range === '24h';
+    const f = (d) => (short ? hm(d) : dm(d) + ' ' + hm(d));
+    const live = Date.now() / 1000 - b < 120;
+    if (before) return 'нет данных до ' + f(db);
+    return 'нет данных ' + f(da) + '–' + (live ? 'сейчас' : f(db)) + ' (' + wordDur((b - a) / 60) + ')';
+  }
+
   function drawLevels(u) {
     const { left, width } = u.bbox, ctx = u.ctx, px = uPlot.pxRatio;
     ctx.save();
@@ -342,6 +421,11 @@
 
   function readout(u) {
     const i = u.cursor.idx;
+    if (u.cursor.left != null && u.cursor.left >= 0) {
+      const t = u.posToVal(u.cursor.left, 'x');
+      const g = S.gaps.find(([a, b]) => t >= a && t <= b);
+      if (g) { setText('readout', gapText(g)); return; }
+    }
     if (i == null || !charts) { setText('readout', ''); return; }
     const d0 = charts[0].data, d1 = charts[1].data;
     const t = d0[0][i];
@@ -371,7 +455,7 @@
         axis({ size: 54, space: 30, values: (u, sp) => sp.map((v) => v + (soc ? ' %' : '')) }),
       ],
       series: soc ? [{}, line(C.orange)] : [{}, line(C.blue), line(C.orange)],
-      hooks: { drawClear: [drawBands], draw: soc ? [drawLevels] : [], setCursor: [readout] },
+      hooks: { drawClear: [drawBands, drawGaps], draw: soc ? [drawLevels] : [], setCursor: [readout] },
     };
   }
 
@@ -380,14 +464,16 @@
   function drawHistory() {
     const h = S.hist;
     const x = [], soc = [], pin = [], pout = [];
+    const nowS = Date.now() / 1000;
+    S.xr = [nowS - RANGES[S.range][0], nowS];
+    S.gaps = findGaps(h.points, h.step, S.xr[0], nowS);
+    const limit = Math.max(600, 3 * h.step);
     let prev = null;
     for (const p of h.points) {
-      if (prev != null && p.t - prev > 3 * h.step) { x.push(prev + h.step); soc.push(null); pin.push(null); pout.push(null); }
+      if (prev != null && p.t - prev > limit) { x.push(prev + h.step); soc.push(null); pin.push(null); pout.push(null); }
       x.push(p.t); soc.push(p.soc); pin.push(p.in); pout.push(p.out);
       prev = p.t;
     }
-    const nowS = Date.now() / 1000;
-    S.xr = [nowS - RANGES[S.range][0], nowS];
     show('hist-empty', !h.points.length);
     if (!charts) {
       const w = chartWidth();
@@ -678,6 +764,8 @@
   for (const b of document.querySelectorAll('#dtek-tabs button')) {
     b.addEventListener('click', () => { D.day = Number(b.dataset.day); renderDtek(); });
   }
+  $('check-btn').addEventListener('click', checkNow);
+  $('check-close').addEventListener('click', () => show('check-res', false));
   document.addEventListener('visibilitychange', syncTimer);
 
   getJSON('/api/now').then(setNow, () => setConn(false));

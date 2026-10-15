@@ -75,11 +75,23 @@ pub struct Dtek {
     pub address: String,
     /// Переопределение адреса набора (только `https://`).
     pub url: Option<String>,
+    /// Отключения короче стольких минут не участвуют в выборе очереди (0 — участвуют все).
+    pub min_cut_min: u32,
+    /// За столько минут до планового отключения — уведомление Windows (0 — не предупреждать).
+    pub warn_min: u32,
 }
 
 impl Default for Dtek {
     fn default() -> Self {
-        Self { enabled: false, region: "kyiv".into(), queues: Vec::new(), address: String::new(), url: None }
+        Self {
+            enabled: false,
+            region: "kyiv".into(),
+            queues: Vec::new(),
+            address: String::new(),
+            url: None,
+            min_cut_min: 15,
+            warn_min: 60,
+        }
     }
 }
 
@@ -278,6 +290,8 @@ fn read_dtek(r: &mut Reader, d: &Dtek) -> Dtek {
         queues,
         address: r.string(s, "address", &d.address).chars().take(200).collect(),
         url,
+        min_cut_min: r.int(s, "min_cut_min", d.min_cut_min as i64, 0, 1440) as u32,
+        warn_min: r.int(s, "warn_min", d.warn_min as i64, 0, 720) as u32,
     }
 }
 
@@ -467,9 +481,11 @@ enabled = true
 address = \"вул. Прикладна, 1\"
              queues = [\"GPV9.1\", \"GPV21.1\", \"GPV9.1\"]
 url = \"https://example.org/k.json\"
+min_cut_min = 0
 ",
         );
         assert!(l.warnings.is_empty(), "{:?}", l.warnings);
+        assert_eq!(l.config.dtek.min_cut_min, 0);
         let d = l.config.dtek;
         assert!(d.enabled);
         assert_eq!(d.queues, ["GPV9.1", "GPV21.1"]);

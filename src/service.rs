@@ -9,7 +9,9 @@ use crate::ble::{ReadOptions, ReadOutcome};
 use crate::clock::{Clock, MIN, Ts, to_local_iso};
 use crate::config::Config;
 use crate::decision::{self, Action, DecisionState, Input};
-use crate::http::{ErrorView, HealthView, LevelsView, NowView, OutageView, StationView};
+use crate::http::{
+    CheckRequest, CheckView, ErrorView, HealthView, LevelsView, NowView, OutageView, StationView,
+};
 use crate::model::{EcoLevel, ManualMode, MissReason, ReadStatus, Reading};
 use crate::notify::Notifier;
 use crate::power::hibernate::Hibernator;
@@ -23,18 +25,24 @@ const TITLE: &str = "Bluetti Watcher";
 #[allow(async_fn_in_trait)]
 pub trait StationReader {
     async fn read(&mut self, encryption_hint: Option<bool>, ts: Ts) -> Result<ReadOutcome, MissReason>;
+
+    /// Видна ли станция в рекламе BLE прямо сейчас; `None` — проверить нельзя.
+    async fn advertising(&mut self) -> Option<bool> {
+        None
+    }
 }
 
 #[cfg(windows)]
 pub struct WinRtReader {
     address: Option<u64>,
     keys: crate::ble::crypto::Keys,
+    unanswered: crate::ble::Unanswered,
 }
 
 #[cfg(windows)]
 impl WinRtReader {
     pub fn new(address: Option<u64>) -> Self {
-        Self { address, keys: crate::ble::crypto::Keys::bluetti() }
+        Self { address, keys: crate::ble::crypto::Keys::bluetti(), unanswered: Default::default() }
     }
 }
 
@@ -44,7 +52,18 @@ impl StationReader for WinRtReader {
         let address = self.address.ok_or(MissReason::NoAddress)?;
         let mut t = crate::ble::winrt::WinRtTransport::new(address);
         let opts = ReadOptions { encryption_hint, ..ReadOptions::default() };
-        crate::ble::read_station(&mut t, &self.keys, &opts, ts).await
+        crate::ble::read_station_tracked(&mut t, &self.keys, &opts, ts, &mut self.unanswered).await
+    }
+
+    async fn advertising(&mut self) -> Option<bool> {
+        let address = self.address?;
+        match crate::ble::scan::seen(address, Duration::from_secs(8)).await {
+            Ok(seen) => Some(seen),
+            Err(e) => {
+                tracing::warn!("скан BLE для проверки: {e}");
+                None
+            }
+        }
     }
 }
 
@@ -54,6 +73,8 @@ pub struct Channels {
     pub health: watch::Sender<HealthView>,
     pub events: broadcast::Sender<store::Event>,
     pub modes: mpsc::UnboundedReceiver<ManualMode>,
+    /// Кнопка «Проверить подключение сейчас».
+    pub checks: mpsc::UnboundedReceiver<CheckRequest>,
     /// Закончившиеся отключения для выбора очереди ДТЭК; `None` — график выключен.
     pub outages: Option<mpsc::UnboundedSender<crate::dtek::FinishedOutage>>,
 }
@@ -135,10 +156,11 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
         self.publish(now);
     }
 
-    /// Один цикл. `manual` — кнопка на дашборде с прошлого цикла.
-    pub async fn tick(&mut self, manual: Option<ManualMode>) {
+    /// Один цикл. `manual` — кнопка на дашборде с прошлого цикла. Возвращает результат первого чтения.
+    pub async fn tick(&mut self, manual: Option<ManualMode>) -> Result<Reading, MissReason> {
         let ts = self.clock.now();
         let reading = self.read(ts).await;
+        let first = reading.clone();
         let actions = self.decide(ts, reading, false, manual);
         let fresh_needed = actions.contains(&Action::NeedFreshReading);
         self.run_actions(ts, actions);
@@ -156,29 +178,85 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
             log_db(self.store.purge(ts).map(|_| ()));
         }
         self.publish(ts);
+        first
     }
 
-    /// Бесконечный цикл с шагом `poll_sec`; кнопка режима запускает цикл сразу.
+    /// Бесконечный цикл с шагом `poll_sec`; кнопки режима и проверки запускают цикл сразу.
     pub async fn run(&mut self) {
         self.start();
         let period = Duration::from_secs(u64::from(self.cfg.poll_sec));
         let mut ticker = tokio::time::interval(period);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            let manual = tokio::select! {
-                _ = ticker.tick() => None,
-                m = self.channels.modes.recv() => m,
+            let mut manual = None;
+            let mut checks = Vec::new();
+            let early = tokio::select! {
+                _ = ticker.tick() => false,
+                Some(m) = self.channels.modes.recv() => { manual = Some(m); true }
+                Some(c) = self.channels.checks.recv() => { checks.push(c); true }
             };
             // Несколько нажатий подряд — берём последнее.
-            let mut manual = manual;
             while let Ok(m) = self.channels.modes.try_recv() {
                 manual = Some(m);
             }
-            self.tick(manual).await;
-            if manual.is_some() {
+            while let Ok(c) = self.channels.checks.try_recv() {
+                checks.push(c);
+            }
+            self.cycle(manual, checks).await;
+            if early {
                 ticker.reset();
             }
+            crate::memory::trim();
         }
+    }
+
+    /// Цикл и ответ всем, кто ждёт проверку подключения.
+    pub async fn cycle(&mut self, manual: Option<ManualMode>, checks: Vec<CheckRequest>) {
+        let started = std::time::Instant::now();
+        let first = self.tick(manual).await;
+        if checks.is_empty() {
+            return;
+        }
+        let view = self.check_view(first, started).await;
+        for c in checks {
+            let _ = c.send(view.clone());
+        }
+    }
+
+    async fn check_view(
+        &mut self,
+        first: Result<Reading, MissReason>,
+        started: std::time::Instant,
+    ) -> CheckView {
+        let ts = self.clock.now();
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let view = match first {
+            Ok(r) => {
+                let soc = r.soc.map_or(String::new(), |s| format!("заряд {s} %, "));
+                let secs = format!("{:.1}", elapsed_ms as f64 / 1000.0).replace('.', ",");
+                CheckView {
+                    ok: true,
+                    title: "Связь со станцией есть".into(),
+                    detail: format!("Станция ответила: {soc}чтение заняло {secs} с."),
+                    ..Default::default()
+                }
+            }
+            Err(e) => {
+                let advertising = if e.needs_scan() { self.reader.advertising().await } else { None };
+                let (title, hint) = e.explain(advertising);
+                CheckView {
+                    ok: false,
+                    title: title.into(),
+                    detail: hint.into(),
+                    reason: Some(e.code()),
+                    advertising,
+                    ..Default::default()
+                }
+            }
+        };
+        let kind = if view.ok { "check-ok" } else { "check-failed" };
+        self.event(ts, kind, format!("Проверка подключения: {}", view.title), None);
+        CheckView { ts: to_local_iso(ts), elapsed_ms, ..view }
     }
 
     async fn read(&mut self, ts: Ts) -> Result<Reading, MissReason> {
@@ -437,6 +515,10 @@ mod tests {
                 o
             })
         }
+
+        async fn advertising(&mut self) -> Option<bool> {
+            Some(false)
+        }
     }
 
     fn ok(soc: u8, ac_in: u32) -> Result<ReadOutcome, MissReason> {
@@ -535,6 +617,7 @@ mod tests {
         let (health, _) = watch::channel(HealthView::default());
         let (events, _) = broadcast::channel(16);
         let (_tx, modes) = mpsc::unbounded_channel();
+        let (_check_tx, checks) = mpsc::unbounded_channel();
         let (outages_tx, outages_rx) = mpsc::unbounded_channel();
         let mut backend = FakePower {
             active: crate::power::HIGH_PERFORMANCE.into(),
@@ -560,7 +643,7 @@ mod tests {
             Box::new(FakeHib(hibernations.clone())),
             Box::new(FakeNotify(notes.clone())),
             PathBuf::from("Z:/nonexistent/no-hibernate"),
-            Channels { now, health, events, modes, outages: Some(outages_tx) },
+            Channels { now, health, events, modes, checks, outages: Some(outages_tx) },
         );
         Harness { svc, hibernations, notes, outages: outages_rx }
     }
@@ -570,7 +653,7 @@ mod tests {
         let mut h = harness(vec![ok(80, 100), Err(MissReason::Timeout), ok(80, 100)]);
         h.svc.start();
         for _ in 0..3 {
-            h.svc.tick(None).await;
+            let _ = h.svc.tick(None).await;
             h.svc.clock.advance(MIN);
         }
         assert_eq!(h.svc.store.last_accepted().unwrap().unwrap().soc, Some(80));
@@ -587,7 +670,7 @@ mod tests {
         h.svc.start();
         let mut saw_eco = false;
         for _ in 0..18 {
-            h.svc.tick(None).await;
+            let _ = h.svc.tick(None).await;
             h.svc.clock.advance(MIN);
             if h.svc.power.backend().active != crate::power::HIGH_PERFORMANCE {
                 saw_eco = true;
@@ -607,6 +690,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn check_answers_with_reading_or_reason() {
+        let mut h = harness(vec![ok(70, 0), Err(MissReason::Unreachable)]);
+        h.svc.start();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        h.svc.cycle(None, vec![tx]).await;
+        let v = rx.try_recv().unwrap();
+        assert!(v.ok && v.detail.contains("заряд 70 %"), "{v:?}");
+        assert_eq!(h.svc.store.last_accepted().unwrap().unwrap().soc, Some(70));
+
+        h.svc.clock.advance(MIN);
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        h.svc.cycle(None, vec![tx]).await;
+        let v = rx.try_recv().unwrap();
+        assert!(!v.ok);
+        assert_eq!((v.reason, v.advertising), (Some("unreachable"), Some(false)));
+        assert_eq!(v.title, "Станция не видна по Bluetooth");
+        let kinds: Vec<String> = h.svc.store.recent_events(10).unwrap().into_iter().map(|e| e.kind).collect();
+        assert!(kinds.contains(&"check-ok".to_string()) && kinds.contains(&"check-failed".to_string()));
+    }
+
+    #[tokio::test]
     async fn drain_hibernates_once_with_warning() {
         let mut reads = vec![ok(25, 300), ok(25, 300)];
         // 1 % за 3 минуты от 25 до 3.
@@ -617,7 +721,7 @@ mod tests {
         let mut h = harness(reads);
         h.svc.start();
         for _ in 0..n {
-            h.svc.tick(None).await;
+            let _ = h.svc.tick(None).await;
             h.svc.clock.advance(MIN);
         }
         assert_eq!(*h.hibernations.borrow(), 1);

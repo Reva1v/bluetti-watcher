@@ -10,6 +10,7 @@ pub mod http;
 pub mod install;
 pub mod instance;
 pub mod logging;
+pub mod memory;
 pub mod model;
 pub mod notify;
 pub mod paths;

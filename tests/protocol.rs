@@ -7,7 +7,7 @@ use bluetti_watcher::ble::crypto::{
     self, Keys, decrypt_frame, encrypt_frame_fixed, encrypt_frame_seeded, kex_body, kex_frame, md5,
     pubkey_bytes, pubkey_from_bytes,
 };
-use bluetti_watcher::ble::{ReadOptions, Transport, modbus, read_station};
+use bluetti_watcher::ble::{ReadOptions, Transport, Unanswered, modbus, read_station, read_station_tracked};
 use bluetti_watcher::model::MissReason;
 use p256::ecdh::EphemeralSecret;
 use p256::ecdsa::signature::{Signer, Verifier};
@@ -47,6 +47,9 @@ struct FakeStation {
     tx: Option<UnboundedSender<Vec<u8>>>,
     sent: Vec<Outgoing>,
     disconnected: bool,
+    /// Ответы на чтение этого блока задерживаются и приходят перед ответом на следующий запрос.
+    mute: Option<u16>,
+    late: Vec<Vec<u8>>,
 }
 
 impl FakeStation {
@@ -74,6 +77,8 @@ impl FakeStation {
             tx: None,
             sent: Vec::new(),
             disconnected: false,
+            mute: None,
+            late: Vec::new(),
         }
     }
 
@@ -116,6 +121,13 @@ impl Transport for FakeStation {
             Phase::Plain => {
                 self.sent.push(Outgoing { raw: data.to_vec(), plain: Some(data.to_vec()) });
                 let resp = self.modbus_response(data);
+                if self.mute == Some(u16::from_be_bytes([data[2], data[3]])) {
+                    self.late.push(resp);
+                    return Ok(());
+                }
+                for late in std::mem::take(&mut self.late) {
+                    self.notify(&late);
+                }
                 self.notify(&resp);
             }
             Phase::AwaitChallengeResp => {
@@ -258,4 +270,26 @@ async fn only_handshake_and_read_frames_go_out() {
             assert!(ok, "запрещённый кадр: {:02x?}", o.raw);
         }
     }
+}
+
+/// Поздний ответ на блок 140×10 из прошлого опроса той же длины, что и ответ на 100×10: он не должен лечь
+/// в поля заряда (иначе заряд = 182 % — мощность AC-выхода).
+#[tokio::test]
+async fn late_answer_from_previous_read_is_set_aside() {
+    let (keys, station_sign, client_verify) = test_keys();
+    let mut st = FakeStation::new(false, station_sign, client_verify);
+    let opts = ReadOptions { answer_timeout: std::time::Duration::from_millis(100), ..fast_opts() };
+    let mut unanswered = Unanswered::default();
+    st.mute = Some(140);
+    let r = read_station_tracked(&mut st, &keys, &opts, 1, &mut unanswered).await;
+    assert_eq!(r, Err(MissReason::Timeout));
+
+    st.mute = None;
+    let out = read_station_tracked(&mut st, &keys, &opts, 2, &mut unanswered).await.expect("чтение");
+    assert_eq!(out.reading.soc, Some(64));
+    assert_eq!(out.reading.ac_out_w, Some(182));
+    assert_eq!(out.reading.dc_out_w, Some(4));
+    let asked: Vec<u16> = st.sent.iter().map(|o| u16::from_be_bytes([o.raw[2], o.raw[3]])).collect();
+    // Первое чтение: 100, 140 (без ответа). Второе: 100 переспрошен, 140 переспрошен из-за лишнего ответа на 100.
+    assert_eq!(asked, [100, 140, 100, 100, 140, 140, 1314]);
 }

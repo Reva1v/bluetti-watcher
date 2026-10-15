@@ -74,7 +74,18 @@ pub fn choose(
     if let Some(q) = fixed {
         return Some((q.clone(), QueueStatus::Fixed));
     }
-    let guess = candidates.iter().find(|q| cells(q, today).is_some()).unwrap_or(first);
+    // Самая большая группа кандидатов с одинаковыми сегодня и завтра (при равенстве — раньше в списке): у одного
+    // адреса обычно несколько равных подочередей, а одиночка скорее чужая.
+    let key = |q: &String| (cells(q, today), cells(q, tomorrow));
+    let guess = candidates
+        .iter()
+        .filter(|q| cells(q, today).is_some())
+        .map(|q| (q, candidates.iter().filter(|o| key(o) == key(q)).count()))
+        .fold(None, |best: Option<(&String, usize)>, (q, n)| match best {
+            Some((_, b)) if b >= n => best,
+            _ => Some((q, n)),
+        })
+        .map_or(first, |(q, _)| q);
     Some((guess.clone(), QueueStatus::Guess))
 }
 
@@ -167,6 +178,21 @@ mod tests {
         assert_eq!(choose(Some(&s), &c, &st, D0, D1), Some(("GPV9.1".into(), QueueStatus::Guess)));
         assert_eq!(choose(None, &c, &st, D0, D1), Some(("GPV5.1".into(), QueueStatus::Guess)));
         assert_eq!(choose(Some(&s), &[], &st, D0, D1), None);
+    }
+
+    #[test]
+    fn guess_prefers_the_largest_group_of_equal_candidates() {
+        // 2026-10-15: 9.1 и 21.1 разошлись с остальными, адресу соответствовали 33.1/45.1/57.1.
+        let c = cand(&["GPV9.1", "GPV21.1", "GPV33.1", "GPV45.1", "GPV57.1"]);
+        let s = sched(&[
+            ("GPV9.1", cells(&[12, 13, 14])),
+            ("GPV21.1", cells(&[12, 13, 14, 21, 22, 23, 24])),
+            ("GPV33.1", cells(&[12, 13, 14, 22, 23, 24])),
+            ("GPV45.1", cells(&[12, 13, 14, 22, 23, 24])),
+            ("GPV57.1", cells(&[12, 13, 14, 22, 23, 24])),
+        ]);
+        let st = QueueState::default();
+        assert_eq!(choose(Some(&s), &c, &st, D0, D1), Some(("GPV33.1".into(), QueueStatus::Guess)));
     }
 
     #[test]

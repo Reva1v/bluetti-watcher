@@ -133,6 +133,8 @@ enabled = false
 region = "kyiv"             # dataset kyiv.json
 address = ""                # caption on the card only
 queues = []                 # candidate queues, e.g. ["GPV9.1", "GPV21.1"]
+min_cut_min = 15            # shorter cuts do not count when picking the queue
+warn_min = 60               # Windows notification this many minutes before a planned cut (0 = off)
 ```
 
 Every key and its limits: [contracts/cli-config.md](specs/001-rust-station-watcher/contracts/cli-config.md); the

@@ -14,6 +14,8 @@ use rand::rngs::OsRng;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::{Instant, timeout_at};
 
+use modbus::FrameStart;
+
 use crate::clock::Ts;
 use crate::model::{MissReason, Reading};
 use crypto::{Keys, Session, Step};
@@ -63,6 +65,65 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// Запросы, ответ на которые ещё не пришёл, — в том числе из прошлых чтений: переподключение может
+/// застать тот же радиоканал, и поздний ответ придёт уже в следующем опросе. Блоки 100×10 и 140×10 отвечают
+/// кадрами одной длины, так что без этого поздний ответ на один блок прошёл бы CRC и лёг в поля другого.
+#[derive(Debug, Default)]
+pub struct Unanswered(Vec<(u16, u16, Instant)>);
+
+/// Чей ответ пришёл, пока ждали запрос `addr`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Claim {
+    /// Подходит только к нашему запросу.
+    Ours,
+    /// Мог прийти и на старый запрос другого блока той же длины: старый вычеркнут, наш надо повторить.
+    Ambiguous,
+    /// Нашему запросу не подходит: поздний ответ на старый (вычеркнут) или чужой кадр.
+    Stray,
+}
+
+impl Unanswered {
+    /// Дольше этого поздний ответ не ждём.
+    const KEEP: Duration = Duration::from_secs(120);
+    const MAX: usize = 8;
+
+    fn sent(&mut self, addr: u16, count: u16) {
+        let now = Instant::now();
+        self.0.retain(|e| now.duration_since(e.2) < Self::KEEP);
+        if self.0.len() >= Self::MAX {
+            self.0.remove(0);
+        }
+        self.0.push((addr, count, now));
+    }
+
+    fn take(&mut self, pick: impl Fn(&(u16, u16, Instant)) -> bool) -> bool {
+        match self.0.iter().position(pick) {
+            Some(i) => {
+                self.0.remove(i);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn claim(&mut self, frame: &[u8], addr: u16, count: u16) -> Claim {
+        let exception = modbus::is_exception(frame);
+        let fits = |c: u16| exception || frame.len() == modbus::response_len(c);
+        if !fits(count) {
+            self.take(|e| fits(e.1));
+            return Claim::Stray;
+        }
+        if self.take(|e| e.0 != addr && fits(e.1)) {
+            return Claim::Ambiguous;
+        }
+        self.take(|e| e.0 == addr && e.1 == count);
+        Claim::Ours
+    }
+}
+
+/// Сколько раз переспросить блок, если ответ мог быть поздним ответом на другой.
+const MAX_REASK: u32 = 2;
+
 /// Одно чтение: подключение, рукопожатие (если станция шифрует), три блока, отключение — всегда.
 pub async fn read_station<T: Transport>(
     t: &mut T,
@@ -70,8 +131,19 @@ pub async fn read_station<T: Transport>(
     opts: &ReadOptions,
     ts: Ts,
 ) -> Result<ReadOutcome, MissReason> {
+    read_station_tracked(t, keys, opts, ts, &mut Unanswered::default()).await
+}
+
+/// То же, но с журналом неотвеченных запросов между чтениями (сервис держит его всё время работы).
+pub async fn read_station_tracked<T: Transport>(
+    t: &mut T,
+    keys: &Keys,
+    opts: &ReadOptions,
+    ts: Ts,
+    unanswered: &mut Unanswered,
+) -> Result<ReadOutcome, MissReason> {
     let deadline = Instant::now() + opts.total_timeout;
-    let r = match timeout_at(deadline, read_inner(t, keys, opts, ts)).await {
+    let r = match timeout_at(deadline, read_inner(t, keys, opts, ts, unanswered)).await {
         Ok(r) => r,
         Err(_) => Err(MissReason::Timeout),
     };
@@ -84,6 +156,7 @@ async fn read_inner<T: Transport>(
     keys: &Keys,
     opts: &ReadOptions,
     ts: Ts,
+    unanswered: &mut Unanswered,
 ) -> Result<ReadOutcome, MissReason> {
     let mut rx = t.connect().await?;
     let mut session = Session::new(keys.clone());
@@ -128,18 +201,43 @@ async fn read_inner<T: Transport>(
     }
 
     let mut blocks = Vec::new();
+    let mut buf = Vec::new();
     for (addr, count) in ac180p::BLOCKS {
-        let cmd = modbus::read_request(addr, count);
-        tracing::debug!(target: "frames", "-> modbus {}", hex(&cmd));
-        let frame = if encrypted {
-            session.clear_buffer();
-            session.encrypt_command(&cmd, &mut rng).map_err(|_| MissReason::CryptoError)?
-        } else {
-            cmd
+        let mut asks = 0;
+        let resp = 'block: loop {
+            let cmd = modbus::read_request(addr, count);
+            tracing::debug!(target: "frames", "-> modbus {}", hex(&cmd));
+            let frame = if encrypted {
+                session.clear_buffer();
+                session.encrypt_command(&cmd, &mut rng).map_err(|_| MissReason::CryptoError)?
+            } else {
+                cmd
+            };
+            t.write(&frame).await?;
+            unanswered.sent(addr, count);
+            let deadline = Instant::now() + opts.answer_timeout;
+            loop {
+                let resp = next_frame(&mut rx, &mut session, encrypted, &mut buf, deadline).await?;
+                tracing::debug!(target: "frames", "<- modbus {}", hex(&resp));
+                match unanswered.claim(&resp, addr, count) {
+                    Claim::Ours => break 'block resp,
+                    Claim::Stray => tracing::debug!("блок {addr}×{count}: лишний кадр пропущен"),
+                    Claim::Ambiguous if asks < MAX_REASK => {
+                        asks += 1;
+                        tracing::info!(
+                            "блок {addr}×{count}: ответ мог быть поздним ответом на другой блок, повтор"
+                        );
+                        continue 'block;
+                    }
+                    Claim::Ambiguous => {
+                        tracing::warn!(
+                            "блок {addr}×{count}: ответы остаются неоднозначными, чтение не принято"
+                        );
+                        return Err(MissReason::ModbusError);
+                    }
+                }
+            }
         };
-        t.write(&frame).await?;
-        let resp = receive_response(&mut rx, &mut session, encrypted, count, opts.answer_timeout).await?;
-        tracing::debug!(target: "frames", "<- modbus {}", hex(&resp));
         match modbus::parse_read_response(&resp, count) {
             Ok(vals) => blocks.push((addr, vals)),
             Err(modbus::ModbusError::Exception(code)) => {
@@ -154,17 +252,24 @@ async fn read_inner<T: Transport>(
     Ok(ReadOutcome { reading: ac180p::to_reading(ts, &blocks), encrypted })
 }
 
-async fn receive_response(
+/// Следующий кадр-ответ из уведомлений: длина по заголовку, хвост остаётся в `buf` до следующего вызова.
+async fn next_frame(
     rx: &mut UnboundedReceiver<Vec<u8>>,
     session: &mut Session,
     encrypted: bool,
-    count: u16,
-    wait: Duration,
+    buf: &mut Vec<u8>,
+    deadline: Instant,
 ) -> Result<Vec<u8>, MissReason> {
-    let deadline = Instant::now() + wait;
-    let mut buf = Vec::new();
     let mut rng = OsRng;
     loop {
+        match modbus::frame_start(buf) {
+            FrameStart::Len(n) if buf.len() >= n => return Ok(buf.drain(..n).collect()),
+            FrameStart::Junk => {
+                tracing::debug!(target: "frames", "<- не ответ, пропущено: {}", hex(buf));
+                buf.clear();
+            }
+            _ => {}
+        }
         let data = match timeout_at(deadline, rx.recv()).await {
             Ok(Some(d)) => d,
             Ok(None) => return Err(MissReason::NotFound),
@@ -173,17 +278,15 @@ async fn receive_response(
         if encrypted {
             tracing::debug!(target: "frames", "<- {}", hex(&data));
             match session.on_notify(&data, &mut rng) {
-                Ok(Step::Data(plain)) => return Ok(plain),
-                Ok(_) => continue,
+                Ok(Step::Data(plain)) => buf.extend_from_slice(&plain),
+                Ok(_) => {}
                 Err(e) => {
                     tracing::warn!("расшифровка ответа: {e}");
                     return Err(MissReason::CryptoError);
                 }
             }
-        }
-        buf.extend_from_slice(&data);
-        if buf.len() >= modbus::expected_len(&buf, count) {
-            return Ok(buf);
+        } else {
+            buf.extend_from_slice(&data);
         }
     }
 }

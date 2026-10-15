@@ -16,6 +16,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::clock::{Clock, MIN, Ts, to_local_iso};
 use crate::config;
+use crate::notify::Notifier;
 use crate::store::{self, Store};
 use fetch::{Fetched, Source};
 use model::{Cell, Schedule};
@@ -131,6 +132,9 @@ pub struct Refresher<S: Source, C: Clock> {
     queue: QueueState,
     error: Option<String>,
     failing: bool,
+    notifier: Box<dyn Notifier>,
+    /// Начало окна, о котором уже предупредили (`meta.dtek_warned`): после перезапуска не повторять.
+    warned: Option<Ts>,
 }
 
 impl<S: Source, C: Clock> Refresher<S, C> {
@@ -141,6 +145,7 @@ impl<S: Source, C: Clock> Refresher<S, C> {
         clock: C,
         events: broadcast::Sender<store::Event>,
         tx: watch::Sender<DtekView>,
+        notifier: Box<dyn Notifier>,
     ) -> Self {
         let url = fetch::dataset_url(&cfg.region, cfg.url.as_deref());
         let key = format!("{url}|{}", cfg.queues.join(","));
@@ -149,15 +154,32 @@ impl<S: Source, C: Clock> Refresher<S, C> {
         if queue::sanitize(&mut queue, &cfg.queues) {
             log_db(store.set_meta("dtek_queue", &queue));
         }
-        Self { cfg, url, key, store, source, clock, events, tx, schedule, queue, error: None, failing: false }
+        let warned = store.get_meta::<Ts>("dtek_warned");
+        Self {
+            cfg,
+            url,
+            key,
+            store,
+            source,
+            clock,
+            events,
+            tx,
+            schedule,
+            queue,
+            error: None,
+            failing: false,
+            notifier,
+            warned,
+        }
     }
 
     pub fn view(&self) -> DtekView {
         view(&self.cfg, self.schedule.as_ref(), &self.queue, self.error.as_deref(), self.clock.now())
     }
 
-    /// Отдать снимок, если он изменился.
-    pub fn publish(&self) {
+    /// Отдать снимок, если он изменился, и предупредить о близком отключении.
+    pub fn publish(&mut self) {
+        self.warn();
         let v = self.view();
         self.tx.send_if_modified(|cur| {
             if *cur == v {
@@ -225,9 +247,17 @@ impl<S: Source, C: Clock> Refresher<S, C> {
         }
     }
 
-    /// Закончившееся отключение — в выбор очереди (US2).
+    /// Закончившееся отключение — в выбор очереди (US2). Короче `min_cut_min` не учитывается: мигание
+    /// света не совпадёт ни с одним окном и только сбросит серию.
     pub fn observe(&mut self, start: Ts, end: Ts) {
         let Some(s) = &self.schedule else { return };
+        if end - start < Ts::from(self.cfg.min_cut_min) * MIN {
+            tracing::debug!(
+                "отключение {} мин короче dtek.min_cut_min, в выбор очереди не идёт",
+                (end - start) / MIN
+            );
+            return;
+        }
         if queue::observe(s, &self.cfg.queues, &mut self.queue, start, end) {
             log_db(self.store.set_meta("dtek_queue", &self.queue));
             if let Some(q) = &self.queue.fixed {
@@ -235,6 +265,37 @@ impl<S: Source, C: Clock> Refresher<S, C> {
             }
         }
         self.publish();
+    }
+
+    /// Уведомление за `warn_min` минут до начала планового окна показанной очереди — один раз на окно.
+    fn warn(&mut self) {
+        let lead = Ts::from(self.cfg.warn_min) * MIN;
+        let Some(s) = self.schedule.as_ref().filter(|_| lead > 0) else { return };
+        let now = self.clock.now();
+        let today = windows::local_date(now).and_then(windows::midnight).unwrap_or(now);
+        let Some((q, _)) =
+            queue::choose(Some(s), &self.cfg.queues, &self.queue, today, windows::wall(today, 24 * 60))
+        else {
+            return;
+        };
+        let Some(w) = windows::off_windows(s.queue_days(&q)).into_iter().find(|w| w.start > now) else {
+            return;
+        };
+        if w.start - now > lead || self.warned == Some(w.start) {
+            return;
+        }
+        let minutes = (w.start - now + MIN - 1) / MIN;
+        let title = format!("Через {minutes} мин отключение света");
+        let text = format!(
+            "По графику ДТЭК {}–{} (очередь {})",
+            hhmm(w.start),
+            hhmm(w.end),
+            q.trim_start_matches("GPV")
+        );
+        self.notifier.notify(&title, &text);
+        self.event(now, "dtek-warn", format!("{title}: {text}"));
+        self.warned = Some(w.start);
+        log_db(self.store.set_meta("dtek_warned", &w.start));
     }
 
     fn event(&self, ts: Ts, kind: &str, text: String) {
@@ -261,6 +322,11 @@ impl<S: Source, C: Clock> Refresher<S, C> {
             }
         }
     }
+}
+
+fn hhmm(t: Ts) -> String {
+    use chrono::TimeZone;
+    chrono::Local.timestamp_millis_opt(t).single().map(|d| d.format("%H:%M").to_string()).unwrap_or_default()
 }
 
 fn log_db<T>(r: rusqlite::Result<T>) {
@@ -391,6 +457,20 @@ mod tests {
         );
     }
 
+    type Notes = Rc<RefCell<Vec<String>>>;
+
+    struct FakeNotify(Notes);
+    impl Notifier for FakeNotify {
+        fn notify(&self, title: &str, text: &str) {
+            self.0.borrow_mut().push(format!("{title} | {text}"));
+        }
+    }
+
+    fn notes() -> (Box<dyn Notifier>, Notes) {
+        let n = Notes::default();
+        (Box::new(FakeNotify(n.clone())), n)
+    }
+
     /// Фейковый источник: очередь ответов, запоминает присланный ETag.
     struct Fake {
         replies: Vec<Result<Fetched, String>>,
@@ -427,7 +507,8 @@ mod tests {
             ],
             etags: etags.clone(),
         };
-        let mut r = Refresher::new(owner_cfg(), store, fake, FakeClock::new(today + 3 * H), events, tx);
+        let mut r =
+            Refresher::new(owner_cfg(), store, fake, FakeClock::new(today + 3 * H), events, tx, notes().0);
         r.publish();
         assert_eq!(rx.borrow().queue_status, Some(QueueStatus::Guess));
         r.refresh().await;
@@ -453,14 +534,75 @@ mod tests {
         // Отключение, совпавшее со всеми пятью, серию не начинает.
         r.observe(today + 9 * H, today + 12 * H + 30 * MIN);
         assert_eq!(r.store.get_meta::<QueueState>("dtek_queue"), None);
+        // Короткое (14 мин) не сбрасывает серию; 15 мин уже учитывается.
+        r.queue = QueueState { fixed: None, streak_queue: Some("GPV9.1".into()), streak_count: 1 };
+        r.observe(today + 20 * H, today + 20 * H + 14 * MIN);
+        assert_eq!(r.queue.streak_count, 1);
+        r.observe(today + 20 * H, today + 20 * H + 15 * MIN);
+        assert_eq!(r.queue.streak_count, 0);
 
         // Новый запуск: кэш сразу, без запроса.
         let store = std::mem::replace(&mut r.store, Store::in_memory().unwrap());
         let (events, _) = broadcast::channel(16);
         let (tx, rx) = watch::channel(DtekView::disabled());
         let fake = Fake { replies: vec![], etags: Rc::new(RefCell::new(Vec::new())) };
-        let r2 = Refresher::new(owner_cfg(), store, fake, FakeClock::new(today + 10 * H), events, tx);
+        let mut r2 =
+            Refresher::new(owner_cfg(), store, fake, FakeClock::new(today + 10 * H), events, tx, notes().0);
         r2.publish();
         assert_eq!(rx.borrow().now.as_ref().unwrap().power, Power::Off);
+    }
+
+    #[tokio::test]
+    async fn warns_once_before_each_planned_cut() {
+        let (_, today) = fixture_schedule();
+        let (events, mut ev_rx) = broadcast::channel(16);
+        let (tx, _rx) = watch::channel(DtekView::disabled());
+        let fake = Fake {
+            replies: vec![Ok(Fetched::Body { body: body(today), etag: None })],
+            etags: Rc::new(RefCell::new(Vec::new())),
+        };
+        let (n, seen) = notes();
+        let clock = FakeClock::new(today + 7 * H);
+        let mut r = Refresher::new(owner_cfg(), Store::in_memory().unwrap(), fake, clock, events, tx, n);
+        r.refresh().await;
+        assert!(seen.borrow().is_empty(), "за 2 часа рано");
+        r.clock.set(today + 8 * H + 10 * MIN);
+        r.publish();
+        r.clock.set(today + 8 * H + 30 * MIN);
+        r.publish();
+        assert_eq!(
+            *seen.borrow(),
+            ["Через 50 мин отключение света | По графику ДТЭК 09:00–12:30 (очередь 9.1)"]
+        );
+        assert_eq!(ev_rx.try_recv().unwrap().kind, "dtek-warn");
+        // Во время окна — тишина; следующее окно — своё уведомление.
+        r.clock.set(today + 10 * H);
+        r.publish();
+        r.clock.set(today + 19 * H);
+        r.publish();
+        assert_eq!(seen.borrow().len(), 2);
+        assert!(seen.borrow()[1].starts_with("Через 60 мин"));
+
+        // Перезапуск: о том же окне не повторяет; warn_min = 0 — молчит.
+        let store = std::mem::replace(&mut r.store, Store::in_memory().unwrap());
+        let (events, _) = broadcast::channel(16);
+        let (tx, _rx) = watch::channel(DtekView::disabled());
+        let fake = Fake { replies: vec![], etags: Rc::new(RefCell::new(Vec::new())) };
+        let (n, seen) = notes();
+        let mut r2 = Refresher::new(
+            owner_cfg(),
+            store,
+            fake,
+            FakeClock::new(today + 19 * H + 30 * MIN),
+            events,
+            tx,
+            n,
+        );
+        r2.publish();
+        assert!(seen.borrow().is_empty());
+        r2.cfg.warn_min = 0;
+        r2.warned = None;
+        r2.publish();
+        assert!(seen.borrow().is_empty());
     }
 }

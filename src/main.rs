@@ -168,6 +168,7 @@ async fn cmd_run(paths: &paths::Paths, dry_run: bool) -> ExitCode {
     let (health_tx, health_rx) = tokio::sync::watch::channel(http::HealthView::default());
     let (events_tx, _) = tokio::sync::broadcast::channel(64);
     let (mode_tx, mode_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (check_tx, check_rx) = tokio::sync::mpsc::unbounded_channel();
     let (dtek_tx, dtek_rx) = tokio::sync::watch::channel(bluetti_watcher::dtek::DtekView::disabled());
     let outages_tx = spawn_dtek(&cfg, paths, events_tx.clone(), dtek_tx);
     let app = http::AppState {
@@ -176,6 +177,7 @@ async fn cmd_run(paths: &paths::Paths, dry_run: bool) -> ExitCode {
         now: now_rx,
         events: events_tx.clone(),
         mode_tx,
+        check_tx,
         health: health_rx,
         dtek: dtek_rx,
     };
@@ -196,8 +198,10 @@ async fn cmd_run(paths: &paths::Paths, dry_run: bool) -> ExitCode {
         health: health_tx,
         events: events_tx,
         modes: mode_rx,
+        checks: check_rx,
         outages: outages_tx,
     };
+    bluetti_watcher::memory::spawn_trimmer(std::time::Duration::from_secs(10));
     let reader = service::WinRtReader::new(cfg.mac);
     let mut svc = service::Service::new(
         cfg,
@@ -243,6 +247,9 @@ fn spawn_dtek(
         bluetti_watcher::clock::SystemClock,
         events,
         view,
+        Box::new(bluetti_watcher::notify::ToastNotifier::new(
+            paths.bin_dir().join("bluetti-watcher.exe").exists(),
+        )),
     );
     tokio::task::spawn_local(refresher.run(rx));
     Some(tx)

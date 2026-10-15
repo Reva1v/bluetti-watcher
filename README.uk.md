@@ -131,6 +131,8 @@ enabled = false
 region = "kyiv"             # набір даних kyiv.json
 address = ""                # лише підпис на картці
 queues = []                 # черги-кандидати, напр. ["GPV9.1", "GPV21.1"]
+min_cut_min = 15            # коротші відключення не враховуються під час вибору черги
+warn_min = 60               # сповіщення Windows за стільки хвилин до планового відключення (0 — вимк.)
 ```
 
 Усі ключі та межі — [contracts/cli-config.md](specs/001-rust-station-watcher/contracts/cli-config.md); графік —

@@ -42,9 +42,30 @@ pub fn response_len(count: u16) -> usize {
     2 * count as usize + 5
 }
 
-/// Сколько байт ответа ещё ждать: ответ-исключение короче обычного (5 байт).
-pub fn expected_len(buf: &[u8], count: u16) -> usize {
-    if buf.len() >= 2 && buf[1] == FN_READ | 0x80 { 5 } else { response_len(count) }
+/// Что лежит в начале буфера уведомлений.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameStart {
+    /// Мало байт, чтобы понять длину.
+    Need,
+    /// Ответ этой длины: исключение — 5 байт, чтение — 5 + байты данных.
+    Len(usize),
+    /// Не начало ответа на чтение.
+    Junk,
+}
+
+pub fn frame_start(buf: &[u8]) -> FrameStart {
+    const FN_ERR: u8 = FN_READ | 0x80;
+    match buf {
+        [] | [UNIT] | [UNIT, FN_READ] => FrameStart::Need,
+        [UNIT, FN_ERR, ..] => FrameStart::Len(5),
+        [UNIT, FN_READ, n, ..] => FrameStart::Len(5 + *n as usize),
+        _ => FrameStart::Junk,
+    }
+}
+
+/// Ответ-исключение (на любой запрос).
+pub fn is_exception(frame: &[u8]) -> bool {
+    frame.len() >= 2 && frame[1] == FN_READ | 0x80
 }
 
 /// `01 03 <len> <data…> <crc LE>` → значения регистров (u16 BE).
@@ -85,6 +106,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn frame_start_by_header() {
+        assert_eq!(frame_start(&[]), FrameStart::Need);
+        assert_eq!(frame_start(&[0x01, 0x03]), FrameStart::Need);
+        assert_eq!(frame_start(&[0x01, 0x03, 20, 0]), FrameStart::Len(25));
+        assert_eq!(frame_start(&[0x01, 0x83]), FrameStart::Len(5));
+        assert_eq!(frame_start(&[0x55, 0x03, 20]), FrameStart::Junk);
+        assert_eq!(frame_start(&[0x01, 0x10, 20]), FrameStart::Junk);
+    }
+
+    #[test]
     fn crc_matches_reference_vector() {
         assert_eq!(crc16(&[0x01, 0x03, 0x00, 0x66, 0x00, 0x01]), 0x1564);
     }
@@ -121,7 +152,7 @@ mod tests {
         let mut ex = vec![UNIT, 0x83, 0x02];
         let crc = crc16(&ex);
         ex.extend_from_slice(&crc.to_le_bytes());
-        assert_eq!(expected_len(&ex, 10), 5);
+        assert_eq!(frame_start(&ex), FrameStart::Len(5));
         assert_eq!(parse_read_response(&ex, 10), Err(ModbusError::Exception(2)));
     }
 }

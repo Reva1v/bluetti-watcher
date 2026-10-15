@@ -70,6 +70,19 @@ Server-Sent Events: `event: now`, `data: <тело /api/now>` после каж�
 Тело: `{ "mode": "auto" | "eco" | "max" }` → 202 `{ "manual": "max" }`; неизвестный режим → 400.
 Применяется сервисом в ближайшем цикле. Уровни батареи и гибернация действуют при любом режиме.
 
+## POST /api/check
+
+Кнопка «Проверить подключение сейчас». Тот же заголовок `X-Bluetti-Watcher: 1` (иначе 403), тело не нужно.
+Сервис сразу делает обычный цикл (показание пишется в историю как всегда) и, если станция не ответила с причиной
+`not-found`, `unreachable` или `timeout`, до 8 с слушает эфир BLE: видна ли станция. Ответ 200:
+
+`{ "ok": false, "ts": "<ts>", "title": "Станция не видна по Bluetooth", "detail": "<подсказка>", "reason": "unreachable",
+"advertising": false, "elapsedMs": 812 }`; при успехе `ok: true`, `reason` и `advertising` — null. Событие `check-ok` или
+`check-failed` попадает в журнал. Сервис не ответил за 2 мин — 504.
+
+Причины: `no-address`, `ble-off`, `not-found` (Windows не знает устройство), `unreachable` (GATT недоступен),
+`no-service` (нет ff01/ff02), `timeout`, `crypto-error`, `modbus-error`.
+
 ## GET /api/health
 
 `{ "ok": true, "version": "0.1.0", "lastReading": "<ts>|null", "encryption": true|null, "readOk24h": 0.97 }` — для

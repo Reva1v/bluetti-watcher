@@ -1,4 +1,6 @@
-//! Транспорт BLE через WinRT (research.md R2): подключение по адресу без сканирования.
+//! Транспорт BLE через WinRT (research.md R2): подключение по адресу; скан — только если Windows забыла станцию.
+
+use std::time::Duration;
 
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use windows::Devices::Bluetooth::GenericAttributeProfile::{
@@ -9,7 +11,8 @@ use windows::Devices::Bluetooth::{BluetoothAdapter, BluetoothCacheMode, Bluetoot
 use windows::Devices::Radios::RadioState;
 use windows::Foundation::TypedEventHandler;
 use windows::Storage::Streams::{DataReader, DataWriter};
-use windows::core::{GUID, Ref};
+use windows::core::{GUID, Interface, Ref, RuntimeType};
+use windows_future::{IAsyncInfo, IAsyncOperation};
 
 use super::Transport;
 use crate::model::MissReason;
@@ -17,13 +20,54 @@ use crate::model::MissReason;
 pub const NOTIFY_UUID: GUID = GUID::from_u128(0x0000ff01_0000_1000_8000_00805f9b34fb);
 pub const WRITE_UUID: GUID = GUID::from_u128(0x0000ff02_0000_1000_8000_00805f9b34fb);
 
-struct Link {
+/// Дождаться WinRT-операции; если future бросили (таймаут чтения), операция отменяется. Сама windows-rs её
+/// не отменяет, и брошенное подключение жило бы дальше, мешая следующему опросу.
+pub(crate) async fn cancellable<T: RuntimeType + 'static>(
+    op: windows::core::Result<IAsyncOperation<T>>,
+) -> windows::core::Result<T> {
+    struct CancelOnDrop(Option<IAsyncInfo>);
+    impl Drop for CancelOnDrop {
+        fn drop(&mut self) {
+            if let Some(info) = self.0.take() {
+                let _ = info.Cancel();
+            }
+        }
+    }
+    let op = op?;
+    let mut guard = CancelOnDrop(op.cast().ok());
+    let r = op.await;
+    guard.0 = None;
+    r
+}
+
+/// Устройство и его сервисы; закрываются при drop — в том числе когда чтение бросили посреди подключения.
+struct Conn {
     device: BluetoothLEDevice,
     services: Vec<GattDeviceService>,
+}
+
+impl Drop for Conn {
+    fn drop(&mut self) {
+        for s in &self.services {
+            let _ = s.Close();
+        }
+        let _ = self.device.Close();
+    }
+}
+
+struct Link {
     notify: GattCharacteristic,
     write: GattCharacteristic,
     write_option: GattWriteOption,
     token: i64,
+    /// Поля падают после `Drop::drop`: сначала снимается подписка, потом закрывается устройство.
+    _conn: Conn,
+}
+
+impl Drop for Link {
+    fn drop(&mut self) {
+        let _ = self.notify.RemoveValueChanged(self.token);
+    }
 }
 
 pub struct WinRtTransport {
@@ -41,13 +85,11 @@ impl WinRtTransport {
 
 /// Адаптер есть и радио включено.
 pub async fn adapter_ready() -> bool {
-    let Ok(op) = BluetoothAdapter::GetDefaultAsync() else { return false };
-    let Ok(adapter) = op.await else { return false };
+    let Ok(adapter) = cancellable(BluetoothAdapter::GetDefaultAsync()).await else { return false };
     if !adapter.IsLowEnergySupported().unwrap_or(false) {
         return false;
     }
-    let Ok(op) = adapter.GetRadioAsync() else { return false };
-    match op.await {
+    match cancellable(adapter.GetRadioAsync()).await {
         Ok(radio) => radio.State().map(|s| s == RadioState::On).unwrap_or(false),
         Err(_) => false,
     }
@@ -67,8 +109,9 @@ async fn find_characteristic(
     mode: BluetoothCacheMode,
 ) -> Option<GattCharacteristic> {
     for s in services {
-        let Ok(op) = s.GetCharacteristicsForUuidWithCacheModeAsync(uuid, mode) else { continue };
-        let Ok(r) = op.await else { continue };
+        let Ok(r) = cancellable(s.GetCharacteristicsForUuidWithCacheModeAsync(uuid, mode)).await else {
+            continue;
+        };
         if r.Status().ok() != Some(GattCommunicationStatus::Success) {
             continue;
         }
@@ -87,34 +130,32 @@ impl WinRtTransport {
         &mut self,
         mode: BluetoothCacheMode,
     ) -> Result<(Link, UnboundedReceiver<Vec<u8>>), MissReason> {
-        let device = BluetoothLEDevice::FromBluetoothAddressAsync(self.address)
-            .map_err(|_| MissReason::NotFound)?
-            .await
-            .map_err(|_| MissReason::NotFound)?;
-        let result = device
-            .GetGattServicesWithCacheModeAsync(mode)
-            .map_err(|_| MissReason::NotFound)?
-            .await
-            .map_err(|_| MissReason::NotFound)?;
-        if result.Status().ok() != Some(GattCommunicationStatus::Success) {
-            let _ = device.Close();
-            return Err(MissReason::NotFound);
-        }
-        let services: Vec<GattDeviceService> =
-            result.Services().map(|v| v.into_iter().collect()).unwrap_or_default();
-        let close = |device: &BluetoothLEDevice, services: &[GattDeviceService]| {
-            for s in services {
-                let _ = s.Close();
+        // `NotFound` — только когда Windows не знает устройство; всё дальше — `Unreachable`.
+        let device =
+            cancellable(BluetoothLEDevice::FromBluetoothAddressAsync(self.address)).await.map_err(|e| {
+                tracing::debug!("устройство по адресу: {e}");
+                MissReason::NotFound
+            })?;
+        let mut conn = Conn { device, services: Vec::new() };
+        let result = match cancellable(conn.device.GetGattServicesWithCacheModeAsync(mode)).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!("GATT-сервисы: {e}");
+                return Err(MissReason::Unreachable);
             }
-            let _ = device.Close();
         };
+        let status = result.Status().ok();
+        if status != Some(GattCommunicationStatus::Success) {
+            tracing::debug!("GATT-сервисы: {status:?}");
+            return Err(MissReason::Unreachable);
+        }
+        conn.services = result.Services().map(|v| v.into_iter().collect()).unwrap_or_default();
         let (Some(notify), Some(write)) = (
-            find_characteristic(&services, NOTIFY_UUID, mode).await,
-            find_characteristic(&services, WRITE_UUID, mode).await,
+            find_characteristic(&conn.services, NOTIFY_UUID, mode).await,
+            find_characteristic(&conn.services, WRITE_UUID, mode).await,
         ) else {
             tracing::warn!("у устройства нет характеристик BLUETTI ff01/ff02");
-            close(&device, &services);
-            return Err(MissReason::NotFound);
+            return Err(MissReason::NoService);
         };
 
         let props = write.CharacteristicProperties().unwrap_or_default();
@@ -136,29 +177,18 @@ impl WinRtTransport {
                 Ok(())
             },
         );
-        let token = match notify.ValueChanged(&handler) {
-            Ok(t) => t,
-            Err(_) => {
-                close(&device, &services);
-                return Err(MissReason::NotFound);
-            }
-        };
+        let Ok(token) = notify.ValueChanged(&handler) else { return Err(MissReason::NotFound) };
+        let link = Link { notify, write, write_option, token, _conn: conn };
         // Служебная запись дескриптора CCCD (конституция, принцип I, v1.0.1).
-        let cccd = async {
-            notify
-                .WriteClientCharacteristicConfigurationDescriptorWithResultAsync(
-                    GattClientCharacteristicConfigurationDescriptorValue::Notify,
-                )?
-                .await?
-                .Status()
-        }
-        .await;
+        let cccd = cancellable(link.notify.WriteClientCharacteristicConfigurationDescriptorWithResultAsync(
+            GattClientCharacteristicConfigurationDescriptorValue::Notify,
+        ))
+        .await
+        .and_then(|r| r.Status());
         if cccd.ok() != Some(GattCommunicationStatus::Success) {
-            let _ = notify.RemoveValueChanged(token);
-            close(&device, &services);
-            return Err(MissReason::NotFound);
+            return Err(MissReason::Unreachable);
         }
-        Ok((Link { device, services, notify, write, write_option, token }, rx))
+        Ok((link, rx))
     }
 }
 
@@ -171,6 +201,20 @@ impl Transport for WinRtTransport {
             if self.uncached_next { BluetoothCacheMode::Uncached } else { BluetoothCacheMode::Cached };
         let r = match self.open(first).await {
             Ok(r) => Ok(r),
+            // Windows забыла станцию (бывает после сна): дождаться её рекламы и повторить.
+            Err(MissReason::NotFound) => {
+                match super::scan::seen(self.address, Duration::from_secs(8)).await {
+                    Ok(true) => {
+                        tracing::info!("станция снова в эфире, повтор подключения");
+                        self.open(BluetoothCacheMode::Uncached).await
+                    }
+                    Ok(false) => Err(MissReason::NotFound),
+                    Err(e) => {
+                        tracing::debug!("скан BLE: {e}");
+                        Err(MissReason::NotFound)
+                    }
+                }
+            }
             Err(_) if first == BluetoothCacheMode::Cached => {
                 tracing::debug!("повтор подключения без кеша GATT");
                 self.open(BluetoothCacheMode::Uncached).await
@@ -196,7 +240,9 @@ impl Transport for WinRtTransport {
             let w = DataWriter::new()?;
             w.WriteBytes(data)?;
             let buf = w.DetachBuffer()?;
-            link.write.WriteValueWithResultAndOptionAsync(&buf, link.write_option)?.await?.Status()
+            cancellable(link.write.WriteValueWithResultAndOptionAsync(&buf, link.write_option))
+                .await?
+                .Status()
         }
         .await;
         match status {
@@ -210,12 +256,6 @@ impl Transport for WinRtTransport {
     }
 
     async fn disconnect(&mut self) {
-        if let Some(link) = self.link.take() {
-            let _ = link.notify.RemoveValueChanged(link.token);
-            for s in &link.services {
-                let _ = s.Close();
-            }
-            let _ = link.device.Close();
-        }
+        self.link = None;
     }
 }

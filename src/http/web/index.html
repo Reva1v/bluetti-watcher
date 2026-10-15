@@ -34,8 +34,14 @@
   <div class="status" aria-live="polite">
     <span id="st-dot" class="dot"></span>
     <span id="st-text">Подключение…</span>
+    <button type="button" id="check-btn" class="check-btn">Проверить подключение сейчас</button>
   </div>
 </header>
+
+<div id="check-res" class="banner" role="status" hidden>
+  <span><b id="check-title"></b> <span id="check-detail"></span></span>
+  <button type="button" id="check-close" class="check-close" aria-label="Скрыть">×</button>
+</div>
 
 <div id="b-conn" class="banner b-grey" role="alert" hidden>
   <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="#9AA6AF" stroke-width="1.8"></circle><path d="M6 10 H14" stroke="#9AA6AF" stroke-width="1.8" stroke-linecap="round"></path></svg>
@@ -126,6 +132,7 @@
     <div class="legend">
       <span class="lt">Заряд, %</span>
       <span class="li"><i class="sw-band"></i>Отключение</span>
+      <span class="li"><i class="sw-gap"></i>Нет данных</span>
       <span id="readout" class="readout"></span>
     </div>
     <div id="ch-soc" class="chart" role="img" aria-label="График заряда за 6 часов"></div>

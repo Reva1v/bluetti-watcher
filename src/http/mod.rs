@@ -17,7 +17,7 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use crate::clock::{Clock, MIN, SystemClock, Ts, to_local_iso};
 use crate::dtek::DtekView;
@@ -27,7 +27,7 @@ use crate::store::{self, Range, Store};
 
 mod assets;
 
-/// Заголовок, без которого `POST /api/mode` отвергается (форма с чужого сайта его не пошлёт).
+/// Заголовок, без которого `POST /api/mode` и `POST /api/check` отвергаются (форма с чужого сайта его не пошлёт).
 pub const MODE_HEADER: &str = "x-bluetti-watcher";
 
 /// Тело `/api/now` и `event: now`.
@@ -91,6 +91,24 @@ pub struct LevelsView {
     pub warn: bool,
 }
 
+/// Ответ `POST /api/check`: удалось ли прочитать станцию прямо сейчас и почему нет.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckView {
+    pub ok: bool,
+    pub ts: String,
+    pub title: String,
+    pub detail: String,
+    /// Код причины (`MissReason::code`), если связи нет.
+    pub reason: Option<&'static str>,
+    /// Видна ли станция в рекламе BLE; `None` — не проверяли.
+    pub advertising: Option<bool>,
+    pub elapsed_ms: u64,
+}
+
+/// Запрос проверки: сервис отвечает в канал после цикла чтения.
+pub type CheckRequest = oneshot::Sender<CheckView>;
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ErrorView {
     pub ts: String,
@@ -117,6 +135,7 @@ pub struct AppState {
     /// Сервис шлёт сюда новые события.
     pub events: broadcast::Sender<store::Event>,
     pub mode_tx: mpsc::UnboundedSender<ManualMode>,
+    pub check_tx: mpsc::UnboundedSender<CheckRequest>,
     pub health: watch::Receiver<HealthView>,
     /// Задача графика ДТЭК публикует при изменении; при `[dtek] enabled = false` — снимок «выключено».
     pub dtek: watch::Receiver<DtekView>,
@@ -168,6 +187,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/events", get(events))
         .route("/api/stream", get(stream))
         .route("/api/mode", post(mode))
+        .route("/api/check", post(check))
         .route("/api/health", get(health))
         .route("/api/dtek", get(dtek))
         .layer(middleware::from_fn_with_state(shared.clone(), host_guard))
@@ -351,6 +371,21 @@ async fn mode(State(s): St, headers: HeaderMap, body: Bytes) -> Response {
     (StatusCode::ACCEPTED, Json(ModeReply { manual: mode })).into_response()
 }
 
+/// Внеочередное чтение станции. Ждёт текущий цикл, само чтение и, при неудаче, короткий скан BLE.
+async fn check(State(s): St, headers: HeaderMap) -> Response {
+    if headers.get(MODE_HEADER).is_none_or(|v| v.as_bytes() != b"1") {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let (tx, rx) = oneshot::channel();
+    if s.app.check_tx.send(tx).is_err() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "сервис не принимает команды").into_response();
+    }
+    match tokio::time::timeout(Duration::from_secs(120), rx).await {
+        Ok(Ok(v)) => Json(v).into_response(),
+        _ => (StatusCode::GATEWAY_TIMEOUT, "сервис не ответил за 2 минуты").into_response(),
+    }
+}
+
 async fn health(State(s): St) -> Json<HealthView> {
     let mut h = s.app.health.borrow().clone();
     let now = now_ms();
@@ -377,6 +412,7 @@ mod tests {
     struct Env {
         app: Router,
         mode_rx: mpsc::UnboundedReceiver<ManualMode>,
+        check_rx: mpsc::UnboundedReceiver<CheckRequest>,
         now_tx: watch::Sender<NowView>,
         events: broadcast::Sender<store::Event>,
         _health_tx: watch::Sender<HealthView>,
@@ -425,6 +461,7 @@ mod tests {
             watch::channel(HealthView { ok: true, version: "0.1.0".into(), ..Default::default() });
         let (events, _) = broadcast::channel(16);
         let (mode_tx, mode_rx) = mpsc::unbounded_channel();
+        let (check_tx, check_rx) = mpsc::unbounded_channel();
         let (dtek_tx, dtek_rx) = watch::channel(DtekView::disabled());
         let app = router(AppState {
             port: PORT,
@@ -432,10 +469,11 @@ mod tests {
             now: now_rx,
             events: events.clone(),
             mode_tx,
+            check_tx,
             health: health_rx,
             dtek: dtek_rx,
         });
-        Env { app, mode_rx, now_tx, events, _health_tx: health_tx, dtek_tx, dir }
+        Env { app, mode_rx, check_rx, now_tx, events, _health_tx: health_tx, dtek_tx, dir }
     }
 
     fn req(method: Method, uri: &str, host: Option<&str>) -> axum::http::request::Builder {
@@ -517,6 +555,39 @@ mod tests {
         let (st, v) = call(&e.app, post(true, r#"{"mode":"max"}"#)).await;
         assert_eq!((st, v), (StatusCode::ACCEPTED, json!({ "manual": "max" })));
         assert_eq!(e.mode_rx.try_recv().unwrap(), ManualMode::Max);
+    }
+
+    #[tokio::test]
+    async fn check_needs_header_and_returns_service_answer() {
+        let mut e = env("check");
+        let post = |hdr: bool| {
+            let mut b = req(Method::POST, "/api/check", Some("127.0.0.1:8765"));
+            if hdr {
+                b = b.header("X-Bluetti-Watcher", "1");
+            }
+            b.body(Body::empty()).unwrap()
+        };
+        assert_eq!(call(&e.app, post(false)).await.0, StatusCode::FORBIDDEN);
+        assert!(e.check_rx.try_recv().is_err());
+        let app = e.app.clone();
+        let pending = tokio::spawn(async move { call(&app, post(true)).await });
+        let reply = e.check_rx.recv().await.unwrap();
+        reply
+            .send(CheckView {
+                ok: false,
+                title: "Станция не видна по Bluetooth".into(),
+                reason: Some("unreachable"),
+                advertising: Some(false),
+                ..Default::default()
+            })
+            .unwrap();
+        let (st, v) = pending.await.unwrap();
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!((v["ok"].as_bool(), v["reason"].as_str()), (Some(false), Some("unreachable")));
+        assert_eq!(v["advertising"], false);
+        for k in ["ts", "title", "detail", "elapsedMs"] {
+            assert!(v.get(k).is_some(), "{k}");
+        }
     }
 
     #[tokio::test]

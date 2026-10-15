@@ -267,6 +267,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows",
+ "windows-future",
  "winresource",
  "wry",
 ]
