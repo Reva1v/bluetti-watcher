@@ -135,11 +135,32 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .seg button[aria-pressed="true"] { background: var(--accent); color: #160900; font-weight: 600; }
 .mode-text { display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
 .mode-title { font-weight: 600; color: var(--warn); }
-.charge {
-  display: flex; flex-direction: column; gap: 10px; padding-top: 14px; border-top: 1px solid var(--line);
-  font-size: 14px;
+
+/* Режим зарядки: чип у «Сеть есть» и меню под ним */
+.head-right { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.charge { position: relative; display: inline-flex; }
+.chip {
+  display: inline-flex; align-items: center; gap: 7px; padding: 4px 11px 4px 9px; border-radius: 999px;
+  border: 1px solid #3A3A3A; background: #232323; color: var(--soft); font: 500 13px var(--sans);
 }
-.seg button:disabled { cursor: progress; }
+.chip:hover:not(:disabled), .chip[aria-expanded="true"] { border-color: var(--accent); color: var(--text); }
+.chip:disabled { cursor: progress; color: var(--muted); }
+.chip .bolt { width: 12px; height: 12px; fill: var(--accent); }
+.chip .caret { width: 9px; height: 9px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+.menu {
+  position: absolute; z-index: 20; top: calc(100% + 8px); right: 0; width: 270px; padding: 6px;
+  display: flex; flex-direction: column; gap: 2px; background: #202020; border: 1px solid #3A3A3A;
+  border-radius: 12px; box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55);
+}
+.menu button {
+  display: grid; grid-template-columns: 18px 1fr; gap: 2px 8px; padding: 8px 10px; border: 0; border-radius: 8px;
+  background: none; color: var(--text); text-align: left; font-family: var(--sans);
+}
+.menu button:hover, .menu button:focus-visible { background: #2A2A2A; }
+.menu .tick { grid-row: span 2; color: var(--accent); font-weight: 700; visibility: hidden; }
+.menu button[aria-checked="true"] .tick { visibility: visible; }
+.menu .t { font-size: 14px; font-weight: 600; }
+.menu .h { font-size: 12px; color: var(--dim); }
 
 /* Tiles */
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }

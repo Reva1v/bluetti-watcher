@@ -11,11 +11,7 @@
   let HIBERNATE_SOC = 5;
   let LOW_SOC = 20;
   const SRC = { rate: 'По скорости разряда', learned: 'По обученному КПД', capacity: 'По ёмкости станции' };
-  const CHARGE = {
-    standard: ['Стандартная зарядка', 'Обычная скорость зарядки от сети.'],
-    silent: ['Тихая зарядка', 'Медленнее, зато вентиляторы тише.'],
-    turbo: ['Турбо-зарядка', 'Быстрее всего, вентиляторы громче.'],
-  };
+  const CHARGE = { standard: 'стандартная', silent: 'тихая', turbo: 'турбо' };
 
   const S = {
     now: null, outages: [], events: [], range: '6h', hist: null, histAt: 0, xr: [0, 1], gaps: [],
@@ -274,23 +270,31 @@
   }
 
   // ---------- режим зарядки станции (POST /api/charging) ----------
+  // Чип виден, когда режим прочитан со станции или идёт переключение.
   function renderCharge(n) {
     const active = S.chargeBusy || n.chargingMode;
-    for (const b of document.querySelectorAll('#charge-seg button')) {
+    for (const b of document.querySelectorAll('#charge-menu button')) {
       const on = String(b.dataset.charge === active);
-      if (b.getAttribute('aria-pressed') !== on) b.setAttribute('aria-pressed', on);
-      b.disabled = !!S.chargeBusy;
+      if (b.getAttribute('aria-checked') !== on) b.setAttribute('aria-checked', on);
     }
-    let text;
-    if (S.chargeBusy) text = 'Переключаю станцию: ' + CHARGE[S.chargeBusy][0].toLowerCase() + '…';
-    else if (CHARGE[n.chargingMode]) text = CHARGE[n.chargingMode][0] + '. ' + CHARGE[n.chargingMode][1];
-    else text = 'Режим ещё не прочитан со станции.';
-    setText('charge-text', text);
+    $('charge-btn').disabled = !!S.chargeBusy;
+    setText('charge-text', S.chargeBusy ? 'переключаю…' : CHARGE[n.chargingMode] || '');
+    show('charge-btn', !!(S.chargeBusy || CHARGE[n.chargingMode]));
     show('charge-err', !!S.chargeErr);
     setText('charge-err', S.chargeErr);
   }
 
+  function chargeMenu(open) {
+    show('charge-menu', open);
+    $('charge-btn').setAttribute('aria-expanded', String(open));
+    if (open) {
+      const menu = $('charge-menu');
+      (menu.querySelector('[aria-checked="true"]') || menu.querySelector('button')).focus();
+    }
+  }
+
   async function setCharge(mode) {
+    chargeMenu(false);
     if (S.chargeBusy || (S.now && S.now.chargingMode === mode)) return;
     S.chargeBusy = mode; S.chargeErr = '';
     render();
@@ -808,7 +812,14 @@
 
   // ---------- start ----------
   for (const b of document.querySelectorAll('#mode-seg button')) b.addEventListener('click', () => setMode(b.dataset.mode));
-  for (const b of document.querySelectorAll('#charge-seg button')) b.addEventListener('click', () => setCharge(b.dataset.charge));
+  for (const b of document.querySelectorAll('#charge-menu button')) b.addEventListener('click', () => setCharge(b.dataset.charge));
+  $('charge-btn').addEventListener('click', () => chargeMenu($('charge-menu').hidden));
+  document.addEventListener('click', (e) => {
+    if (!$('charge-menu').hidden && !e.target.closest('.charge')) chargeMenu(false);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !$('charge-menu').hidden) { chargeMenu(false); $('charge-btn').focus(); }
+  });
   for (const b of document.querySelectorAll('.hist .tabs button')) b.addEventListener('click', () => pickRange(b.dataset.range));
   for (const b of document.querySelectorAll('#dtek-tabs button')) {
     b.addEventListener('click', () => { D.day = Number(b.dataset.day); renderDtek(); });

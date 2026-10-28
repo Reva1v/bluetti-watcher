@@ -64,7 +64,21 @@
   <div id="c-charge" class="card">
     <div class="card-head">
       <span class="label">Заряд</span>
-      <span id="pill" class="pill" hidden></span>
+      <span class="head-right">
+        <span class="charge">
+          <button type="button" id="charge-btn" class="chip" aria-haspopup="menu" aria-expanded="false" aria-controls="charge-menu" title="Режим зарядки станции" hidden>
+            <svg class="bolt" viewBox="0 0 12 12" aria-hidden="true"><path d="M7 0 1.5 7H5.5L4.5 12 10.5 5H6.5Z"/></svg>
+            <span id="charge-text"></span>
+            <svg class="caret" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.5 5 6.5 8 3.5"/></svg>
+          </button>
+          <div id="charge-menu" class="menu" role="menu" aria-label="Режим зарядки" hidden>
+            <button type="button" role="menuitemradio" data-charge="standard" aria-checked="false"><span class="tick">✓</span><span class="t">Стандартная</span><span class="h">Обычная скорость зарядки от сети</span></button>
+            <button type="button" role="menuitemradio" data-charge="silent" aria-checked="false"><span class="tick">✓</span><span class="t">Тихая</span><span class="h">Медленнее, зато вентиляторы тише</span></button>
+            <button type="button" role="menuitemradio" data-charge="turbo" aria-checked="false"><span class="tick">✓</span><span class="t">Турбо</span><span class="h">Быстрее всего, вентиляторы громче</span></button>
+          </div>
+        </span>
+        <span id="pill" class="pill" hidden></span>
+      </span>
     </div>
     <div class="big-row">
       <span id="soc" class="soc live">—</span>
@@ -80,6 +94,7 @@
       </div>
     </div>
     <span id="soc-note" class="note"></span>
+    <span id="charge-err" class="err" role="alert" hidden></span>
   </div>
 
   <div class="card">
@@ -106,16 +121,6 @@
       <span id="mode-title" class="mode-title"></span>
       <span id="mode-detail" class="dim"></span>
       <span id="mode-err" class="err" role="alert" hidden></span>
-    </div>
-    <div class="charge">
-      <span class="label">Зарядка станции</span>
-      <div id="charge-seg" class="seg" role="group" aria-label="Режим зарядки">
-        <button type="button" data-charge="standard" aria-pressed="false">Стандарт</button>
-        <button type="button" data-charge="silent" aria-pressed="false">Тихая</button>
-        <button type="button" data-charge="turbo" aria-pressed="false">Турбо</button>
-      </div>
-      <span id="charge-text" class="dim"></span>
-      <span id="charge-err" class="err" role="alert" hidden></span>
     </div>
   </div>
 </section>
