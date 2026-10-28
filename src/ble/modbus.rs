@@ -1,7 +1,9 @@
-//! Modbus RTU поверх BLE. Только чтение (функция 0x03): функции записи здесь нет и не будет (конституция, принцип I).
+//! Modbus RTU поверх BLE: чтение (функция 0x03) и запись одного регистра (0x06). Кадр записи собирает только
+//! `ac180p::charging_mode_request` — белый список конституции, принцип I.
 
 pub const UNIT: u8 = 0x01;
 pub const FN_READ: u8 = 0x03;
+pub const FN_WRITE: u8 = 0x06;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ModbusError {
@@ -37,6 +39,16 @@ pub fn read_request(addr: u16, count: u16) -> Vec<u8> {
     f
 }
 
+/// `01 06 <addr BE> <value BE> <crc LE>`. Станция отвечает тем же кадром. Вызывается только из белого списка.
+pub(super) fn write_request(addr: u16, value: u16) -> Vec<u8> {
+    let mut f = vec![UNIT, FN_WRITE];
+    f.extend_from_slice(&addr.to_be_bytes());
+    f.extend_from_slice(&value.to_be_bytes());
+    let crc = crc16(&f);
+    f.extend_from_slice(&crc.to_le_bytes());
+    f
+}
+
 /// Длина полного ответа на чтение `count` регистров.
 pub fn response_len(count: u16) -> usize {
     2 * count as usize + 5
@@ -47,23 +59,25 @@ pub fn response_len(count: u16) -> usize {
 pub enum FrameStart {
     /// Мало байт, чтобы понять длину.
     Need,
-    /// Ответ этой длины: исключение — 5 байт, чтение — 5 + байты данных.
+    /// Ответ этой длины: исключение — 5 байт, чтение — 5 + байты данных, запись — 8.
     Len(usize),
-    /// Не начало ответа на чтение.
+    /// Не начало ответа.
     Junk,
 }
 
 pub fn frame_start(buf: &[u8]) -> FrameStart {
     const FN_ERR: u8 = FN_READ | 0x80;
+    const FN_WRITE_ERR: u8 = FN_WRITE | 0x80;
     match buf {
         [] | [UNIT] | [UNIT, FN_READ] => FrameStart::Need,
-        [UNIT, FN_ERR, ..] => FrameStart::Len(5),
+        [UNIT, FN_ERR | FN_WRITE_ERR, ..] => FrameStart::Len(5),
         [UNIT, FN_READ, n, ..] => FrameStart::Len(5 + *n as usize),
+        [UNIT, FN_WRITE, ..] => FrameStart::Len(8),
         _ => FrameStart::Junk,
     }
 }
 
-/// Ответ-исключение (на любой запрос).
+/// Ответ-исключение на чтение.
 pub fn is_exception(frame: &[u8]) -> bool {
     frame.len() >= 2 && frame[1] == FN_READ | 0x80
 }
@@ -93,6 +107,20 @@ pub fn parse_read_response(resp: &[u8], count: u16) -> Result<Vec<u16>, ModbusEr
     Ok(resp[3..want - 2].chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect())
 }
 
+/// Ответ на запись `req`: `Ok` — станция повторила кадр (значение принято), `Err` — исключение или чужой кадр.
+pub fn check_write_response(resp: &[u8], req: &[u8]) -> Result<(), ModbusError> {
+    if resp == req {
+        return Ok(());
+    }
+    if resp.len() == 5 && resp[..2] == [UNIT, FN_WRITE | 0x80] {
+        if crc16(&resp[..3]).to_le_bytes() != [resp[3], resp[4]] {
+            return Err(ModbusError::Crc);
+        }
+        return Err(ModbusError::Exception(resp[2]));
+    }
+    Err(ModbusError::Unexpected("не ответ на запись"))
+}
+
 /// Кадр — корректный запрос чтения (для проверки инварианта «только чтение»).
 pub fn is_read_request(frame: &[u8]) -> bool {
     frame.len() == 8
@@ -113,6 +141,22 @@ mod tests {
         assert_eq!(frame_start(&[0x01, 0x83]), FrameStart::Len(5));
         assert_eq!(frame_start(&[0x55, 0x03, 20]), FrameStart::Junk);
         assert_eq!(frame_start(&[0x01, 0x10, 20]), FrameStart::Junk);
+        assert_eq!(frame_start(&[0x01, 0x06]), FrameStart::Len(8));
+        assert_eq!(frame_start(&[0x01, 0x86]), FrameStart::Len(5));
+    }
+
+    #[test]
+    fn write_request_and_echo() {
+        let req = write_request(2020, 1);
+        assert_eq!(req[..6], [0x01, 0x06, 0x07, 0xE4, 0x00, 0x01]);
+        assert_eq!(crc16(&req[..6]).to_le_bytes(), [req[6], req[7]]);
+        assert!(!is_read_request(&req));
+        assert_eq!(check_write_response(&req, &req), Ok(()));
+        let mut ex = vec![UNIT, 0x86, 0x03];
+        let crc = crc16(&ex);
+        ex.extend_from_slice(&crc.to_le_bytes());
+        assert_eq!(check_write_response(&ex, &req), Err(ModbusError::Exception(3)));
+        assert!(check_write_response(&write_request(2020, 2), &req).is_err());
     }
 
     #[test]

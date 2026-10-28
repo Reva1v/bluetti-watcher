@@ -19,6 +19,7 @@ use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
+use crate::ble::ac180p::ChargingMode;
 use crate::clock::{Clock, MIN, SystemClock, Ts, to_local_iso};
 use crate::dtek::DtekView;
 use crate::model::{EcoLevel, Mains, ManualMode};
@@ -27,7 +28,7 @@ use crate::store::{self, Range, Store};
 
 mod assets;
 
-/// Заголовок, без которого `POST /api/mode` и `POST /api/check` отвергаются (форма с чужого сайта его не пошлёт).
+/// Заголовок, без которого `POST /api/mode`, `/api/check` и `/api/charging` отвергаются (форма с чужого сайта его не пошлёт).
 pub const MODE_HEADER: &str = "x-bluetti-watcher";
 
 /// Тело `/api/now` и `event: now`.
@@ -47,6 +48,8 @@ pub struct NowView {
     pub eco_at: Option<String>,
     pub eco: EcoLevel,
     pub manual: ManualMode,
+    /// Режим зарядки станции по последнему чтению; `None` — ещё не прочитан или незнакомый.
+    pub charging_mode: Option<ChargingMode>,
     pub hours_left: Option<f64>,
     pub runtime_source: Option<Source>,
     /// Средняя нагрузка, по которой считается время: с начала отключения или за всю историю.
@@ -109,6 +112,22 @@ pub struct CheckView {
 /// Запрос проверки: сервис отвечает в канал после цикла чтения.
 pub type CheckRequest = oneshot::Sender<CheckView>;
 
+/// Ответ `POST /api/charging`: записан ли режим и что станция показала при чтении сразу после записи.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChargingView {
+    pub ok: bool,
+    pub text: String,
+    pub charging_mode: Option<ChargingMode>,
+}
+
+/// Кнопка режима зарядки: сервис пишет режим, читает станцию и отвечает в `reply`.
+#[derive(Debug)]
+pub struct ChargingRequest {
+    pub mode: ChargingMode,
+    pub reply: oneshot::Sender<ChargingView>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ErrorView {
     pub ts: String,
@@ -136,6 +155,7 @@ pub struct AppState {
     pub events: broadcast::Sender<store::Event>,
     pub mode_tx: mpsc::UnboundedSender<ManualMode>,
     pub check_tx: mpsc::UnboundedSender<CheckRequest>,
+    pub charging_tx: mpsc::UnboundedSender<ChargingRequest>,
     pub health: watch::Receiver<HealthView>,
     /// Задача графика ДТЭК публикует при изменении; при `[dtek] enabled = false` — снимок «выключено».
     pub dtek: watch::Receiver<DtekView>,
@@ -188,6 +208,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/stream", get(stream))
         .route("/api/mode", post(mode))
         .route("/api/check", post(check))
+        .route("/api/charging", post(charging))
         .route("/api/health", get(health))
         .route("/api/dtek", get(dtek))
         .layer(middleware::from_fn_with_state(shared.clone(), host_guard))
@@ -386,6 +407,29 @@ async fn check(State(s): St, headers: HeaderMap) -> Response {
     }
 }
 
+#[derive(Deserialize)]
+struct ChargingBody {
+    mode: ChargingMode,
+}
+
+/// Смена режима зарядки станции. Ждёт запись и чтение после неё.
+async fn charging(State(s): St, headers: HeaderMap, body: Bytes) -> Response {
+    if headers.get(MODE_HEADER).is_none_or(|v| v.as_bytes() != b"1") {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Ok(ChargingBody { mode }) = serde_json::from_slice::<ChargingBody>(&body) else {
+        return (StatusCode::BAD_REQUEST, "mode: standard | silent | turbo").into_response();
+    };
+    let (reply, rx) = oneshot::channel();
+    if s.app.charging_tx.send(ChargingRequest { mode, reply }).is_err() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "сервис не принимает команды").into_response();
+    }
+    match tokio::time::timeout(Duration::from_secs(120), rx).await {
+        Ok(Ok(v)) => Json(v).into_response(),
+        _ => (StatusCode::GATEWAY_TIMEOUT, "сервис не ответил за 2 минуты").into_response(),
+    }
+}
+
 async fn health(State(s): St) -> Json<HealthView> {
     let mut h = s.app.health.borrow().clone();
     let now = now_ms();
@@ -413,6 +457,7 @@ mod tests {
         app: Router,
         mode_rx: mpsc::UnboundedReceiver<ManualMode>,
         check_rx: mpsc::UnboundedReceiver<CheckRequest>,
+        charging_rx: mpsc::UnboundedReceiver<ChargingRequest>,
         now_tx: watch::Sender<NowView>,
         events: broadcast::Sender<store::Event>,
         _health_tx: watch::Sender<HealthView>,
@@ -462,6 +507,7 @@ mod tests {
         let (events, _) = broadcast::channel(16);
         let (mode_tx, mode_rx) = mpsc::unbounded_channel();
         let (check_tx, check_rx) = mpsc::unbounded_channel();
+        let (charging_tx, charging_rx) = mpsc::unbounded_channel();
         let (dtek_tx, dtek_rx) = watch::channel(DtekView::disabled());
         let app = router(AppState {
             port: PORT,
@@ -470,10 +516,11 @@ mod tests {
             events: events.clone(),
             mode_tx,
             check_tx,
+            charging_tx,
             health: health_rx,
             dtek: dtek_rx,
         });
-        Env { app, mode_rx, check_rx, now_tx, events, _health_tx: health_tx, dtek_tx, dir }
+        Env { app, mode_rx, check_rx, charging_rx, now_tx, events, _health_tx: health_tx, dtek_tx, dir }
     }
 
     fn req(method: Method, uri: &str, host: Option<&str>) -> axum::http::request::Builder {
@@ -591,6 +638,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn charging_needs_header_valid_mode_and_returns_service_answer() {
+        let mut e = env("charging");
+        let post = |hdr: bool, body: &'static str| {
+            let mut b = req(Method::POST, "/api/charging", Some("127.0.0.1:8765"));
+            if hdr {
+                b = b.header("X-Bluetti-Watcher", "1");
+            }
+            b.body(Body::from(body)).unwrap()
+        };
+        assert_eq!(call(&e.app, post(false, r#"{"mode":"turbo"}"#)).await.0, StatusCode::FORBIDDEN);
+        assert_eq!(call(&e.app, post(true, r#"{"mode":"custom"}"#)).await.0, StatusCode::BAD_REQUEST);
+        assert_eq!(call(&e.app, post(true, r#"{"mode":4}"#)).await.0, StatusCode::BAD_REQUEST);
+        assert!(e.charging_rx.try_recv().is_err());
+        let app = e.app.clone();
+        let pending = tokio::spawn(async move { call(&app, post(true, r#"{"mode":"silent"}"#)).await });
+        let r = e.charging_rx.recv().await.unwrap();
+        assert_eq!(r.mode, ChargingMode::Silent);
+        let view = ChargingView { ok: true, text: "x".into(), charging_mode: Some(ChargingMode::Silent) };
+        r.reply.send(view).unwrap();
+        let (st, v) = pending.await.unwrap();
+        assert_eq!((st, v), (StatusCode::OK, json!({ "ok": true, "text": "x", "chargingMode": "silent" })));
+    }
+
+    #[tokio::test]
     async fn now_has_contract_shape() {
         let e = env("now");
         let (st, v) = get_json(&e.app, "/api/now").await;
@@ -610,6 +681,7 @@ mod tests {
             "ecoAt",
             "eco",
             "manual",
+            "chargingMode",
             "hoursLeft",
             "runtimeSource",
             "avgLoadW",

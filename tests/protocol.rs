@@ -1,13 +1,16 @@
-//! Протокол BLUETTI против фейковой станции: рукопожатие, шифрованное чтение, склейка фрагментов
-//! и инвариант «только чтение» (конституция, принцип I).
+//! Протокол BLUETTI против фейковой станции: рукопожатие, шифрованное чтение, склейка фрагментов, запись
+//! режима зарядки и инвариант «чтение и белый список записей» (конституция, принцип I).
 
 use std::collections::HashMap;
 
+use bluetti_watcher::ble::ac180p::{self, ChargingMode};
 use bluetti_watcher::ble::crypto::{
     self, Keys, decrypt_frame, encrypt_frame_fixed, encrypt_frame_seeded, kex_body, kex_frame, md5,
     pubkey_bytes, pubkey_from_bytes,
 };
-use bluetti_watcher::ble::{ReadOptions, Transport, Unanswered, modbus, read_station, read_station_tracked};
+use bluetti_watcher::ble::{
+    ReadOptions, Transport, Unanswered, modbus, read_station, read_station_tracked, write_charging_mode,
+};
 use bluetti_watcher::model::MissReason;
 use p256::ecdh::EphemeralSecret;
 use p256::ecdsa::signature::{Signer, Verifier};
@@ -50,6 +53,8 @@ struct FakeStation {
     /// Ответы на чтение этого блока задерживаются и приходят перед ответом на следующий запрос.
     mute: Option<u16>,
     late: Vec<Vec<u8>>,
+    /// Отвечать на запись исключением Modbus.
+    refuse_write: bool,
 }
 
 impl FakeStation {
@@ -61,6 +66,8 @@ impl FakeStation {
         regs.insert(144, 0);
         regs.insert(146, 0);
         regs.insert(1314, 0);
+        regs.insert(2020, 1);
+        regs.insert(2021, 0);
         Self {
             encrypted,
             station_sign,
@@ -79,6 +86,7 @@ impl FakeStation {
             disconnected: false,
             mute: None,
             late: Vec::new(),
+            refuse_write: false,
         }
     }
 
@@ -89,7 +97,18 @@ impl FakeStation {
         }
     }
 
-    fn modbus_response(&self, req: &[u8]) -> Vec<u8> {
+    fn modbus_response(&mut self, req: &[u8]) -> Vec<u8> {
+        if req[1] == modbus::FN_WRITE {
+            assert!(ac180p::is_allowed_write(req), "запись вне белого списка: {req:02x?}");
+            if self.refuse_write {
+                let mut r = vec![0x01, 0x86, 0x03];
+                let crc = modbus::crc16(&r);
+                r.extend_from_slice(&crc.to_le_bytes());
+                return r;
+            }
+            self.regs.insert(u16::from_be_bytes([req[2], req[3]]), u16::from_be_bytes([req[4], req[5]]));
+            return req.to_vec();
+        }
         assert!(modbus::is_read_request(req), "станция получила не чтение: {req:02x?}");
         let addr = u16::from_be_bytes([req[2], req[3]]);
         let count = u16::from_be_bytes([req[4], req[5]]);
@@ -222,6 +241,7 @@ async fn encrypted_read_end_to_end() {
     assert_eq!(out.reading.ac_out_w, Some(182));
     assert_eq!(out.reading.dc_out_w, Some(4));
     assert_eq!(out.reading.ac_in_w, Some(0));
+    assert_eq!(out.charging_mode, Some(ChargingMode::Silent));
     assert!(st.disconnected);
 }
 
@@ -254,22 +274,70 @@ async fn real_bluetti_constants_reject_foreign_station() {
     assert_eq!(r, Err(MissReason::CryptoError));
 }
 
-/// Принцип I: станция получает только шаги рукопожатия и запросы чтения 0x03.
+/// Принцип I: станция получает только шаги рукопожатия, запросы чтения 0x03 и запись из белого списка.
 #[tokio::test]
-async fn only_handshake_and_read_frames_go_out() {
+async fn only_handshake_read_and_whitelisted_write_frames_go_out() {
     for encrypted in [true, false] {
         let (keys, station_sign, client_verify) = test_keys();
         let mut st = FakeStation::new(encrypted, station_sign, client_verify);
         read_station(&mut st, &keys, &fast_opts(), 1).await.expect("чтение");
+        let mut un = Unanswered::default();
+        write_charging_mode(&mut st, &keys, &fast_opts(), ChargingMode::Turbo, &mut un)
+            .await
+            .expect("запись");
         assert!(!st.sent.is_empty());
         for o in &st.sent {
             let ok = crypto::kex_body(&o.raw).is_some()
-                || o.plain
-                    .as_deref()
-                    .is_some_and(|p| crypto::kex_body(p).is_some() || modbus::is_read_request(p));
+                || o.plain.as_deref().is_some_and(|p| {
+                    crypto::kex_body(p).is_some() || modbus::is_read_request(p) || ac180p::is_allowed_write(p)
+                });
             assert!(ok, "запрещённый кадр: {:02x?}", o.raw);
         }
     }
+}
+
+#[tokio::test]
+async fn charging_mode_write_end_to_end() {
+    for encrypted in [true, false] {
+        let (keys, station_sign, client_verify) = test_keys();
+        let mut st = FakeStation::new(encrypted, station_sign, client_verify);
+        if !encrypted {
+            st.fragment = 5;
+        }
+        let mut un = Unanswered::default();
+        write_charging_mode(&mut st, &keys, &fast_opts(), ChargingMode::Turbo, &mut un)
+            .await
+            .expect("запись");
+        assert!(st.disconnected);
+        assert_eq!(st.regs[&2020], 2);
+        let out = read_station(&mut st, &keys, &fast_opts(), 1).await.expect("чтение");
+        assert_eq!(out.charging_mode, Some(ChargingMode::Turbo));
+    }
+}
+
+#[tokio::test]
+async fn refused_write_is_modbus_error() {
+    let (keys, station_sign, client_verify) = test_keys();
+    let mut st = FakeStation::new(false, station_sign, client_verify);
+    st.refuse_write = true;
+    let r =
+        write_charging_mode(&mut st, &keys, &fast_opts(), ChargingMode::Standard, &mut Unanswered::default())
+            .await;
+    assert_eq!(r, Err(MissReason::ModbusError));
+    assert_eq!(st.regs[&2020], 1);
+    assert!(st.disconnected);
+}
+
+/// Станция не отвечает на блок настроек: показание всё равно принимается, режим зарядки неизвестен.
+#[tokio::test]
+async fn silent_settings_block_keeps_reading() {
+    let (keys, station_sign, client_verify) = test_keys();
+    let mut st = FakeStation::new(false, station_sign, client_verify);
+    st.mute = Some(2020);
+    let opts = ReadOptions { answer_timeout: std::time::Duration::from_millis(100), ..fast_opts() };
+    let out = read_station(&mut st, &keys, &opts, 1).await.expect("чтение");
+    assert_eq!(out.reading.soc, Some(64));
+    assert_eq!(out.charging_mode, None);
 }
 
 /// Поздний ответ на блок 140×10 из прошлого опроса той же длины, что и ответ на 100×10: он не должен лечь
@@ -291,5 +359,5 @@ async fn late_answer_from_previous_read_is_set_aside() {
     assert_eq!(out.reading.dc_out_w, Some(4));
     let asked: Vec<u16> = st.sent.iter().map(|o| u16::from_be_bytes([o.raw[2], o.raw[3]])).collect();
     // Первое чтение: 100, 140 (без ответа). Второе: 100 переспрошен, 140 переспрошен из-за лишнего ответа на 100.
-    assert_eq!(asked, [100, 140, 100, 100, 140, 140, 1314]);
+    assert_eq!(asked, [100, 140, 100, 100, 140, 140, 1314, 2020]);
 }

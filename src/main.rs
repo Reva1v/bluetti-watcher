@@ -169,6 +169,7 @@ async fn cmd_run(paths: &paths::Paths, dry_run: bool) -> ExitCode {
     let (events_tx, _) = tokio::sync::broadcast::channel(64);
     let (mode_tx, mode_rx) = tokio::sync::mpsc::unbounded_channel();
     let (check_tx, check_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (charging_tx, charging_rx) = tokio::sync::mpsc::unbounded_channel();
     let (dtek_tx, dtek_rx) = tokio::sync::watch::channel(bluetti_watcher::dtek::DtekView::disabled());
     let outages_tx = spawn_dtek(&cfg, paths, events_tx.clone(), dtek_tx);
     let app = http::AppState {
@@ -178,6 +179,7 @@ async fn cmd_run(paths: &paths::Paths, dry_run: bool) -> ExitCode {
         events: events_tx.clone(),
         mode_tx,
         check_tx,
+        charging_tx,
         health: health_rx,
         dtek: dtek_rx,
     };
@@ -199,6 +201,7 @@ async fn cmd_run(paths: &paths::Paths, dry_run: bool) -> ExitCode {
         events: events_tx,
         modes: mode_rx,
         checks: check_rx,
+        charging: charging_rx,
         outages: outages_tx,
     };
     bluetti_watcher::memory::spawn_trimmer(std::time::Duration::from_secs(10));

@@ -27,7 +27,7 @@ A single Rust exe that reads the station over Bluetooth LE once a minute — no 
 
 | | |
 |---|---|
-| 🔋 **Reads the station over Bluetooth** | Once a minute: charge, AC/DC input and output, grid voltage. Read-only — the program never changes a station setting. |
+| 🔋 **Reads the station over Bluetooth** | Once a minute: charge, AC/DC input and output, grid voltage. It changes exactly one station setting, the charging mode, and only when you press a button. |
 | 🌙 **Invisible in the background** | No window, console or tray icon; starts at Windows sign-in without admin rights. Idles at ~0 % CPU and a few megabytes of RAM. |
 | 📈 **Dashboard from a shortcut** | Its own frameless dark window: charge, time left, power, charts for 6 h / 24 h / 7 d / 30 d, outages and events. |
 | ⚡ **Eco during a power cut** | After 3 minutes without mains: the «Bluetti Eco» power plan (CPU up to 80 %, display off after 3 min, best power efficiency), an NVIDIA power limit, Windhawk and NVIDIA Instant Replay stopped. Deep eco at 20 %. |

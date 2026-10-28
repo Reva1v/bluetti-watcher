@@ -1,4 +1,4 @@
-//! Чтение станции по BLE: транспорт, рукопожатие, блоки Modbus → `Reading`.
+//! Станция по BLE: транспорт, рукопожатие, блоки Modbus → `Reading`; запись режима зарядки.
 
 pub mod ac180p;
 pub mod crypto;
@@ -18,6 +18,7 @@ use modbus::FrameStart;
 
 use crate::clock::Ts;
 use crate::model::{MissReason, Reading};
+use ac180p::ChargingMode;
 use crypto::{Keys, Session, Step};
 
 /// GATT-канал до станции. Реализации: WinRT и фейковая станция в тестах.
@@ -59,6 +60,8 @@ impl Default for ReadOptions {
 pub struct ReadOutcome {
     pub reading: Reading,
     pub encrypted: bool,
+    /// Режим зарядки; `None` — блок не прочитан или значение незнакомое.
+    pub charging_mode: Option<ChargingMode>,
 }
 
 fn hex(b: &[u8]) -> String {
@@ -119,6 +122,12 @@ impl Unanswered {
         self.take(|e| e.0 == addr && e.1 == count);
         Claim::Ours
     }
+
+    /// Пришёл кадр, который не ответ на запись: вычеркнуть запрос чтения, которому он мог быть ответом.
+    fn forget(&mut self, frame: &[u8]) {
+        let exception = modbus::is_exception(frame);
+        self.take(|e| exception || frame.len() == modbus::response_len(e.1));
+    }
 }
 
 /// Сколько раз переспросить блок, если ответ мог быть поздним ответом на другой.
@@ -151,13 +160,35 @@ pub async fn read_station_tracked<T: Transport>(
     r
 }
 
-async fn read_inner<T: Transport>(
-    t: &mut T,
-    keys: &Keys,
-    opts: &ReadOptions,
-    ts: Ts,
-    unanswered: &mut Unanswered,
-) -> Result<ReadOutcome, MissReason> {
+/// Подключённый канал: уведомления, сессия и шифрует ли станция.
+struct Link {
+    rx: UnboundedReceiver<Vec<u8>>,
+    session: Session,
+    encrypted: bool,
+}
+
+impl Link {
+    /// Отправить команду Modbus (зашифровав, если станция шифрует).
+    async fn send<T: Transport>(&mut self, t: &mut T, cmd: &[u8]) -> Result<(), MissReason> {
+        tracing::debug!(target: "frames", "-> modbus {}", hex(cmd));
+        let frame = if self.encrypted {
+            self.session.clear_buffer();
+            self.session.encrypt_command(cmd, &mut OsRng).map_err(|_| MissReason::CryptoError)?
+        } else {
+            cmd.to_vec()
+        };
+        t.write(&frame).await
+    }
+
+    async fn next(&mut self, buf: &mut Vec<u8>, deadline: Instant) -> Result<Vec<u8>, MissReason> {
+        let resp = next_frame(&mut self.rx, &mut self.session, self.encrypted, buf, deadline).await?;
+        tracing::debug!(target: "frames", "<- modbus {}", hex(&resp));
+        Ok(resp)
+    }
+}
+
+/// Подключиться и, если станция шифрует, пройти рукопожатие.
+async fn open<T: Transport>(t: &mut T, keys: &Keys, opts: &ReadOptions) -> Result<Link, MissReason> {
     let mut rx = t.connect().await?;
     let mut session = Session::new(keys.clone());
     let mut rng = OsRng;
@@ -199,57 +230,129 @@ async fn read_inner<T: Transport>(
         }
         tracing::debug!("защищённое соединение установлено");
     }
+    Ok(Link { rx, session, encrypted })
+}
 
+async fn read_inner<T: Transport>(
+    t: &mut T,
+    keys: &Keys,
+    opts: &ReadOptions,
+    ts: Ts,
+    unanswered: &mut Unanswered,
+) -> Result<ReadOutcome, MissReason> {
+    let mut link = open(t, keys, opts).await?;
     let mut blocks = Vec::new();
     let mut buf = Vec::new();
     for (addr, count) in ac180p::BLOCKS {
-        let mut asks = 0;
-        let resp = 'block: loop {
-            let cmd = modbus::read_request(addr, count);
-            tracing::debug!(target: "frames", "-> modbus {}", hex(&cmd));
-            let frame = if encrypted {
-                session.clear_buffer();
-                session.encrypt_command(&cmd, &mut rng).map_err(|_| MissReason::CryptoError)?
-            } else {
-                cmd
-            };
-            t.write(&frame).await?;
-            unanswered.sent(addr, count);
-            let deadline = Instant::now() + opts.answer_timeout;
-            loop {
-                let resp = next_frame(&mut rx, &mut session, encrypted, &mut buf, deadline).await?;
-                tracing::debug!(target: "frames", "<- modbus {}", hex(&resp));
-                match unanswered.claim(&resp, addr, count) {
-                    Claim::Ours => break 'block resp,
-                    Claim::Stray => tracing::debug!("блок {addr}×{count}: лишний кадр пропущен"),
-                    Claim::Ambiguous if asks < MAX_REASK => {
-                        asks += 1;
-                        tracing::info!(
-                            "блок {addr}×{count}: ответ мог быть поздним ответом на другой блок, повтор"
-                        );
-                        continue 'block;
-                    }
-                    Claim::Ambiguous => {
-                        tracing::warn!(
-                            "блок {addr}×{count}: ответы остаются неоднозначными, чтение не принято"
-                        );
-                        return Err(MissReason::ModbusError);
-                    }
+        if let Some(vals) = read_block(t, &mut link, &mut buf, opts, unanswered, addr, count).await? {
+            blocks.push((addr, vals));
+        }
+    }
+    // Настройки не нужны для решений: без них показание всё равно принимается.
+    let (addr, count) = ac180p::SETTINGS;
+    match read_block(t, &mut link, &mut buf, opts, unanswered, addr, count).await {
+        Ok(Some(vals)) => blocks.push((addr, vals)),
+        Ok(None) => {}
+        Err(e) => tracing::warn!("блок {addr}×{count}: {e}, режим зарядки неизвестен"),
+    }
+    Ok(ReadOutcome {
+        reading: ac180p::to_reading(ts, &blocks),
+        encrypted: link.encrypted,
+        charging_mode: ac180p::charging_mode(&blocks),
+    })
+}
+
+/// Один блок: значения, `None` — станция ответила исключением (поля останутся пустыми).
+async fn read_block<T: Transport>(
+    t: &mut T,
+    link: &mut Link,
+    buf: &mut Vec<u8>,
+    opts: &ReadOptions,
+    unanswered: &mut Unanswered,
+    addr: u16,
+    count: u16,
+) -> Result<Option<Vec<u16>>, MissReason> {
+    let mut asks = 0;
+    let resp = 'block: loop {
+        link.send(t, &modbus::read_request(addr, count)).await?;
+        unanswered.sent(addr, count);
+        let deadline = Instant::now() + opts.answer_timeout;
+        loop {
+            let resp = link.next(buf, deadline).await?;
+            match unanswered.claim(&resp, addr, count) {
+                Claim::Ours => break 'block resp,
+                Claim::Stray => tracing::debug!("блок {addr}×{count}: лишний кадр пропущен"),
+                Claim::Ambiguous if asks < MAX_REASK => {
+                    asks += 1;
+                    tracing::info!(
+                        "блок {addr}×{count}: ответ мог быть поздним ответом на другой блок, повтор"
+                    );
+                    continue 'block;
+                }
+                Claim::Ambiguous => {
+                    tracing::warn!("блок {addr}×{count}: ответы остаются неоднозначными, чтение не принято");
+                    return Err(MissReason::ModbusError);
                 }
             }
-        };
-        match modbus::parse_read_response(&resp, count) {
-            Ok(vals) => blocks.push((addr, vals)),
-            Err(modbus::ModbusError::Exception(code)) => {
-                tracing::warn!("блок {addr}×{count}: исключение Modbus {code:#04x}, поля останутся пустыми");
+        }
+    };
+    match modbus::parse_read_response(&resp, count) {
+        Ok(vals) => Ok(Some(vals)),
+        Err(modbus::ModbusError::Exception(code)) => {
+            tracing::warn!("блок {addr}×{count}: исключение Modbus {code:#04x}, поля останутся пустыми");
+            Ok(None)
+        }
+        Err(e) => {
+            tracing::warn!("блок {addr}×{count}: {e}");
+            Err(MissReason::ModbusError)
+        }
+    }
+}
+
+/// Записать режим зарядки: подключение, рукопожатие, одна запись из белого списка, отключение — всегда.
+/// `Ok` — станция повторила кадр, то есть значение принято.
+pub async fn write_charging_mode<T: Transport>(
+    t: &mut T,
+    keys: &Keys,
+    opts: &ReadOptions,
+    mode: ChargingMode,
+    unanswered: &mut Unanswered,
+) -> Result<(), MissReason> {
+    let deadline = Instant::now() + opts.total_timeout;
+    let r = match timeout_at(deadline, write_inner(t, keys, opts, mode, unanswered)).await {
+        Ok(r) => r,
+        Err(_) => Err(MissReason::Timeout),
+    };
+    t.disconnect().await;
+    r
+}
+
+async fn write_inner<T: Transport>(
+    t: &mut T,
+    keys: &Keys,
+    opts: &ReadOptions,
+    mode: ChargingMode,
+    unanswered: &mut Unanswered,
+) -> Result<(), MissReason> {
+    let mut link = open(t, keys, opts).await?;
+    let cmd = ac180p::charging_mode_request(mode);
+    link.send(t, &cmd).await?;
+    let deadline = Instant::now() + opts.answer_timeout;
+    let mut buf = Vec::new();
+    loop {
+        let resp = link.next(&mut buf, deadline).await?;
+        match modbus::check_write_response(&resp, &cmd) {
+            Ok(()) => return Ok(()),
+            Err(modbus::ModbusError::Unexpected(_)) => {
+                tracing::debug!("запись режима зарядки: лишний кадр пропущен");
+                unanswered.forget(&resp);
             }
             Err(e) => {
-                tracing::warn!("блок {addr}×{count}: {e}");
+                tracing::warn!("запись режима зарядки: {e}");
                 return Err(MissReason::ModbusError);
             }
         }
     }
-    Ok(ReadOutcome { reading: ac180p::to_reading(ts, &blocks), encrypted })
 }
 
 /// Следующий кадр-ответ из уведомлений: длина по заголовку, хвост остаётся в `buf` до следующего вызова.

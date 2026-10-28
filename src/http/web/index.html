@@ -97,7 +97,7 @@
 
   <div class="card">
     <span class="label">Режим ПК</span>
-    <div class="seg" role="group" aria-label="Режим">
+    <div id="mode-seg" class="seg" role="group" aria-label="Режим">
       <button type="button" data-mode="auto" aria-pressed="false">Авто</button>
       <button type="button" data-mode="eco" aria-pressed="false">Eco</button>
       <button type="button" data-mode="max" aria-pressed="false">Максимум</button>
@@ -106,6 +106,16 @@
       <span id="mode-title" class="mode-title"></span>
       <span id="mode-detail" class="dim"></span>
       <span id="mode-err" class="err" role="alert" hidden></span>
+    </div>
+    <div class="charge">
+      <span class="label">Зарядка станции</span>
+      <div id="charge-seg" class="seg" role="group" aria-label="Режим зарядки">
+        <button type="button" data-charge="standard" aria-pressed="false">Стандарт</button>
+        <button type="button" data-charge="silent" aria-pressed="false">Тихая</button>
+        <button type="button" data-charge="turbo" aria-pressed="false">Турбо</button>
+      </div>
+      <span id="charge-text" class="dim"></span>
+      <span id="charge-err" class="err" role="alert" hidden></span>
     </div>
   </div>
 </section>

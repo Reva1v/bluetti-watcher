@@ -20,6 +20,7 @@
   "ecoAt": null,
   "eco": "deep",
   "manual": "auto",
+  "chargingMode": "silent",
   "hoursLeft": 3.6, "runtimeSource": "rate",
   "levels": { "low": true, "critical": false, "warn": false },
   "hibernateDelayedUntil": null,
@@ -33,6 +34,8 @@
 
 - `stale`: последнее принятое показание старше 5 минут (цифры показываются как «последние известные»).
 - `mains`: `on` / `off` / `unknown`. `eco`: `none` / `eco` / `deep`. `manual`: `auto` / `eco` / `max`.
+- `chargingMode`: режим зарядки станции по последнему чтению (`standard` / `silent` / `turbo`); null — ещё не
+  прочитан или станция показывает незнакомое значение.
 - `ecoAt`: когда включится eco, если сеть не вернётся (только пока сеть пропала, а отключение ещё не началось).
 - `avgLoadW` / `avgLoadScope`: средняя нагрузка, по которой считается время (`outage` — с начала отключения,
   `history` — за всю историю); `hoursIfOutage` — «если свет пропадёт» по ёмкости при средней нагрузке (только на сети).
@@ -82,6 +85,15 @@ Server-Sent Events: `event: now`, `data: <тело /api/now>` после каж�
 
 Причины: `no-address`, `ble-off`, `not-found` (Windows не знает устройство), `unreachable` (GATT недоступен),
 `no-service` (нет ff01/ff02), `timeout`, `crypto-error`, `modbus-error`.
+
+## POST /api/charging
+
+Кнопки «Зарядка станции» (спека 003). Заголовок `X-Bluetti-Watcher: 1` обязателен (иначе 403).
+Тело: `{ "mode": "standard" | "silent" | "turbo" }`; другое → 400. Сервис сразу пишет режим в станцию (регистр 2020,
+единственная разрешённая запись), затем делает обычный цикл чтения. Ответ 200:
+`{ "ok": true, "text": "Режим зарядки: тихий", "chargingMode": "silent" }`; при ошибке `ok: false`, в `text` причина,
+`chargingMode` — что станция показывает сейчас. В `--dry-run` станция не меняется (`ok: false`). События
+`charging-mode` (успех) или `action-failed`. Сервис не ответил за 2 мин — 504.
 
 ## GET /api/health
 

@@ -1,4 +1,4 @@
-// Дашборд Bluetti Watcher: /api/now + SSE /api/stream, история на uPlot, смена режима.
+// Дашборд Bluetti Watcher: /api/now + SSE /api/stream, история на uPlot, смена режима ПК и режима зарядки.
 'use strict';
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -11,10 +11,16 @@
   let HIBERNATE_SOC = 5;
   let LOW_SOC = 20;
   const SRC = { rate: 'По скорости разряда', learned: 'По обученному КПД', capacity: 'По ёмкости станции' };
+  const CHARGE = {
+    standard: ['Стандартная зарядка', 'Обычная скорость зарядки от сети.'],
+    silent: ['Тихая зарядка', 'Медленнее, зато вентиляторы тише.'],
+    turbo: ['Турбо-зарядка', 'Быстрее всего, вентиляторы громче.'],
+  };
 
   const S = {
     now: null, outages: [], events: [], range: '6h', hist: null, histAt: 0, xr: [0, 1], gaps: [],
     pending: null, pendingAt: 0, modeErr: '', conn: true,
+    chargeBusy: null, chargeErr: '',
   };
 
   // ---------- formatting ----------
@@ -146,6 +152,7 @@
 
     renderTimeLeft(n, soc, nowMs);
     renderMode(n, nowMs);
+    renderCharge(n);
 
     // tiles
     tile('t-acin', n.acInW, 'in');
@@ -213,7 +220,7 @@
     const active = S.pending || n.manual;
     // В «Авто» полупрозрачно подсвечен режим, который сейчас фактически действует.
     const effective = active === 'auto' || !active ? (n.eco === 'eco' || n.eco === 'deep' ? 'eco' : 'max') : '';
-    for (const b of document.querySelectorAll('.seg button')) {
+    for (const b of document.querySelectorAll('#mode-seg button')) {
       const on = String(b.dataset.mode === active);
       if (b.getAttribute('aria-pressed') !== on) b.setAttribute('aria-pressed', on);
       b.classList.toggle('effective', b.dataset.mode === effective);
@@ -264,6 +271,44 @@
       S.modeErr = 'Не удалось переключить режим: ' + (e instanceof TypeError ? 'нет связи с сервисом' : e.message);
       render();
     }
+  }
+
+  // ---------- режим зарядки станции (POST /api/charging) ----------
+  function renderCharge(n) {
+    const active = S.chargeBusy || n.chargingMode;
+    for (const b of document.querySelectorAll('#charge-seg button')) {
+      const on = String(b.dataset.charge === active);
+      if (b.getAttribute('aria-pressed') !== on) b.setAttribute('aria-pressed', on);
+      b.disabled = !!S.chargeBusy;
+    }
+    let text;
+    if (S.chargeBusy) text = 'Переключаю станцию: ' + CHARGE[S.chargeBusy][0].toLowerCase() + '…';
+    else if (CHARGE[n.chargingMode]) text = CHARGE[n.chargingMode][0] + '. ' + CHARGE[n.chargingMode][1];
+    else text = 'Режим ещё не прочитан со станции.';
+    setText('charge-text', text);
+    show('charge-err', !!S.chargeErr);
+    setText('charge-err', S.chargeErr);
+  }
+
+  async function setCharge(mode) {
+    if (S.chargeBusy || (S.now && S.now.chargingMode === mode)) return;
+    S.chargeBusy = mode; S.chargeErr = '';
+    render();
+    try {
+      const r = await fetch('/api/charging', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Bluetti-Watcher': '1' },
+        body: JSON.stringify({ mode }),
+      });
+      if (!r.ok) throw new Error((await r.text().catch(() => '')) || 'HTTP ' + r.status);
+      const v = await r.json();
+      if (!v.ok) S.chargeErr = v.text + '.';
+      if (S.now && v.chargingMode) S.now.chargingMode = v.chargingMode;
+    } catch (e) {
+      S.chargeErr = 'Режим зарядки не изменён: ' + (e instanceof TypeError ? 'нет связи с сервисом' : e.message);
+    }
+    S.chargeBusy = null;
+    render();
   }
 
   // ---------- проверка подключения (POST /api/check) ----------
@@ -762,7 +807,8 @@
   }
 
   // ---------- start ----------
-  for (const b of document.querySelectorAll('.seg button')) b.addEventListener('click', () => setMode(b.dataset.mode));
+  for (const b of document.querySelectorAll('#mode-seg button')) b.addEventListener('click', () => setMode(b.dataset.mode));
+  for (const b of document.querySelectorAll('#charge-seg button')) b.addEventListener('click', () => setCharge(b.dataset.charge));
   for (const b of document.querySelectorAll('.hist .tabs button')) b.addEventListener('click', () => pickRange(b.dataset.range));
   for (const b of document.querySelectorAll('#dtek-tabs button')) {
     b.addEventListener('click', () => { D.day = Number(b.dataset.day); renderDtek(); });

@@ -5,12 +5,14 @@ use std::time::Duration;
 
 use tokio::sync::{broadcast, mpsc, watch};
 
+use crate::ble::ac180p::ChargingMode;
 use crate::ble::{ReadOptions, ReadOutcome};
 use crate::clock::{Clock, MIN, Ts, to_local_iso};
 use crate::config::Config;
 use crate::decision::{self, Action, DecisionState, Input};
 use crate::http::{
-    CheckRequest, CheckView, ErrorView, HealthView, LevelsView, NowView, OutageView, StationView,
+    ChargingRequest, ChargingView, CheckRequest, CheckView, ErrorView, HealthView, LevelsView, NowView,
+    OutageView, StationView,
 };
 use crate::model::{EcoLevel, ManualMode, MissReason, ReadStatus, Reading};
 use crate::notify::Notifier;
@@ -25,6 +27,13 @@ const TITLE: &str = "Bluetti Watcher";
 #[allow(async_fn_in_trait)]
 pub trait StationReader {
     async fn read(&mut self, encryption_hint: Option<bool>, ts: Ts) -> Result<ReadOutcome, MissReason>;
+
+    /// Записать режим зарядки; `Ok` — станция подтвердила.
+    async fn write_charging_mode(
+        &mut self,
+        encryption_hint: Option<bool>,
+        mode: ChargingMode,
+    ) -> Result<(), MissReason>;
 
     /// Видна ли станция в рекламе BLE прямо сейчас; `None` — проверить нельзя.
     async fn advertising(&mut self) -> Option<bool> {
@@ -55,6 +64,17 @@ impl StationReader for WinRtReader {
         crate::ble::read_station_tracked(&mut t, &self.keys, &opts, ts, &mut self.unanswered).await
     }
 
+    async fn write_charging_mode(
+        &mut self,
+        encryption_hint: Option<bool>,
+        mode: ChargingMode,
+    ) -> Result<(), MissReason> {
+        let address = self.address.ok_or(MissReason::NoAddress)?;
+        let mut t = crate::ble::winrt::WinRtTransport::new(address);
+        let opts = ReadOptions { encryption_hint, ..ReadOptions::default() };
+        crate::ble::write_charging_mode(&mut t, &self.keys, &opts, mode, &mut self.unanswered).await
+    }
+
     async fn advertising(&mut self) -> Option<bool> {
         let address = self.address?;
         match crate::ble::scan::seen(address, Duration::from_secs(8)).await {
@@ -75,6 +95,8 @@ pub struct Channels {
     pub modes: mpsc::UnboundedReceiver<ManualMode>,
     /// Кнопка «Проверить подключение сейчас».
     pub checks: mpsc::UnboundedReceiver<CheckRequest>,
+    /// Кнопки режима зарядки станции.
+    pub charging: mpsc::UnboundedReceiver<ChargingRequest>,
     /// Закончившиеся отключения для выбора очереди ДТЭК; `None` — график выключен.
     pub outages: Option<mpsc::UnboundedSender<crate::dtek::FinishedOutage>>,
 }
@@ -95,6 +117,8 @@ pub struct Service<R: StationReader, C: Clock, B: PowerBackend> {
     last_error: Option<(Ts, String)>,
     learned: Option<f64>,
     last_learn: Option<Ts>,
+    /// Последний прочитанный режим зарядки.
+    charging_mode: Option<ChargingMode>,
 }
 
 impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
@@ -130,6 +154,7 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
             last_error: None,
             learned,
             last_learn,
+            charging_mode: None,
         }
     }
 
@@ -181,7 +206,7 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
         first
     }
 
-    /// Бесконечный цикл с шагом `poll_sec`; кнопки режима и проверки запускают цикл сразу.
+    /// Бесконечный цикл с шагом `poll_sec`; кнопки режима, зарядки и проверки запускают цикл сразу.
     pub async fn run(&mut self) {
         self.start();
         let period = Duration::from_secs(u64::from(self.cfg.poll_sec));
@@ -190,10 +215,12 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
         loop {
             let mut manual = None;
             let mut checks = Vec::new();
+            let mut charging = Vec::new();
             let early = tokio::select! {
                 _ = ticker.tick() => false,
                 Some(m) = self.channels.modes.recv() => { manual = Some(m); true }
                 Some(c) = self.channels.checks.recv() => { checks.push(c); true }
+                Some(c) = self.channels.charging.recv() => { charging.push(c); true }
             };
             // Несколько нажатий подряд — берём последнее.
             while let Ok(m) = self.channels.modes.try_recv() {
@@ -202,7 +229,10 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
             while let Ok(c) = self.channels.checks.try_recv() {
                 checks.push(c);
             }
-            self.cycle(manual, checks).await;
+            while let Ok(c) = self.channels.charging.try_recv() {
+                charging.push(c);
+            }
+            self.cycle(manual, checks, charging).await;
             if early {
                 ticker.reset();
             }
@@ -210,10 +240,26 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
         }
     }
 
-    /// Цикл и ответ всем, кто ждёт проверку подключения.
-    pub async fn cycle(&mut self, manual: Option<ManualMode>, checks: Vec<CheckRequest>) {
+    /// Цикл и ответ всем, кто ждёт проверку подключения или смену режима зарядки. Режим зарядки пишется до
+    /// чтения, чтобы чтение сразу показало, что стоит на станции; из нескольких нажатий — последнее.
+    pub async fn cycle(
+        &mut self,
+        manual: Option<ManualMode>,
+        checks: Vec<CheckRequest>,
+        charging: Vec<ChargingRequest>,
+    ) {
         let started = std::time::Instant::now();
+        let written = match charging.last() {
+            Some(c) => Some((c.mode, self.set_charging_mode(c.mode).await)),
+            None => None,
+        };
         let first = self.tick(manual).await;
+        if let Some((mode, result)) = written {
+            let view = self.charging_view(mode, result);
+            for c in charging {
+                let _ = c.reply.send(view.clone());
+            }
+        }
         if checks.is_empty() {
             return;
         }
@@ -259,12 +305,46 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
         CheckView { ts: to_local_iso(ts), elapsed_ms, ..view }
     }
 
+    /// Запись режима зарядки по кнопке. В `--dry-run` станция не меняется.
+    async fn set_charging_mode(&mut self, mode: ChargingMode) -> Result<(), String> {
+        let ts = self.clock.now();
+        if self.cfg.dry_run {
+            tracing::info!("dry run: режим зарядки «{}» не записан", mode.title());
+            return Err("режим --dry-run, станция не менялась".into());
+        }
+        match self.reader.write_charging_mode(self.encryption, mode).await {
+            Ok(()) => {
+                self.charging_mode = Some(mode);
+                let data = serde_json::json!({ "mode": mode }).to_string();
+                self.event(ts, "charging-mode", format!("Режим зарядки: {}", mode.title()), Some(data));
+                Ok(())
+            }
+            Err(e) => {
+                self.fail(ts, format!("режим зарядки «{}» не установлен: {e}", mode.title()));
+                Err(e.to_string())
+            }
+        }
+    }
+
+    /// Ответ кнопке: итог записи и что станция показала при чтении сразу после неё.
+    fn charging_view(&self, mode: ChargingMode, result: Result<(), String>) -> ChargingView {
+        let (ok, text) = match result {
+            Ok(()) if self.charging_mode == Some(mode) => (true, format!("Режим зарядки: {}", mode.title())),
+            Ok(()) => (false, "Станция приняла команду, но показывает другой режим".to_string()),
+            Err(e) => (false, format!("Режим зарядки не изменён: {e}")),
+        };
+        ChargingView { ok, text, charging_mode: self.charging_mode }
+    }
+
     async fn read(&mut self, ts: Ts) -> Result<Reading, MissReason> {
         match self.reader.read(self.encryption, ts).await {
             Ok(out) => {
                 if self.encryption != Some(out.encrypted) {
                     self.encryption = Some(out.encrypted);
                     log_db(self.store.set_meta("encryption", &out.encrypted));
+                }
+                if out.charging_mode.is_some() {
+                    self.charging_mode = out.charging_mode;
                 }
                 Ok(out.reading)
             }
@@ -450,6 +530,7 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
             eco_at: iso(v.eco_at),
             eco: v.eco,
             manual: v.manual,
+            charging_mode: self.charging_mode,
             hours_left: estimate.as_ref().map(|e| e.hours),
             runtime_source: estimate.map(|e| e.source),
             avg_load_w: avg.map(|a| a.round() as u32),
@@ -505,15 +586,37 @@ mod tests {
     use super::*;
     use crate::clock::FakeClock;
 
-    struct Fake(Vec<Result<ReadOutcome, MissReason>>);
+    /// Показания по очереди (последнее повторяется) и режим зарядки, который меняет запись.
+    struct Fake {
+        reads: Vec<Result<ReadOutcome, MissReason>>,
+        charging: Option<ChargingMode>,
+        write_err: Option<MissReason>,
+        writes: u32,
+    }
 
     impl StationReader for Fake {
         async fn read(&mut self, _: Option<bool>, ts: Ts) -> Result<ReadOutcome, MissReason> {
-            let next = if self.0.len() > 1 { self.0.remove(0) } else { self.0[0].clone() };
+            let next = if self.reads.len() > 1 { self.reads.remove(0) } else { self.reads[0].clone() };
             next.map(|mut o| {
                 o.reading.ts = ts;
+                o.charging_mode = self.charging;
                 o
             })
+        }
+
+        async fn write_charging_mode(
+            &mut self,
+            _: Option<bool>,
+            mode: ChargingMode,
+        ) -> Result<(), MissReason> {
+            self.writes += 1;
+            match self.write_err {
+                Some(e) => Err(e),
+                None => {
+                    self.charging = Some(mode);
+                    Ok(())
+                }
+            }
         }
 
         async fn advertising(&mut self) -> Option<bool> {
@@ -532,6 +635,7 @@ mod tests {
                 ..Default::default()
             },
             encrypted: false,
+            charging_mode: None,
         })
     }
 
@@ -618,6 +722,7 @@ mod tests {
         let (events, _) = broadcast::channel(16);
         let (_tx, modes) = mpsc::unbounded_channel();
         let (_check_tx, checks) = mpsc::unbounded_channel();
+        let (_charging_tx, charging) = mpsc::unbounded_channel();
         let (outages_tx, outages_rx) = mpsc::unbounded_channel();
         let mut backend = FakePower {
             active: crate::power::HIGH_PERFORMANCE.into(),
@@ -637,13 +742,13 @@ mod tests {
         let svc = Service::new(
             cfg,
             Store::in_memory().unwrap(),
-            Fake(reads),
+            Fake { reads, charging: Some(ChargingMode::Standard), write_err: None, writes: 0 },
             FakeClock::new(1_000 * MIN),
             power,
             Box::new(FakeHib(hibernations.clone())),
             Box::new(FakeNotify(notes.clone())),
             PathBuf::from("Z:/nonexistent/no-hibernate"),
-            Channels { now, health, events, modes, checks, outages: Some(outages_tx) },
+            Channels { now, health, events, modes, checks, charging, outages: Some(outages_tx) },
         );
         Harness { svc, hibernations, notes, outages: outages_rx }
     }
@@ -694,20 +799,69 @@ mod tests {
         let mut h = harness(vec![ok(70, 0), Err(MissReason::Unreachable)]);
         h.svc.start();
         let (tx, mut rx) = tokio::sync::oneshot::channel();
-        h.svc.cycle(None, vec![tx]).await;
+        h.svc.cycle(None, vec![tx], vec![]).await;
         let v = rx.try_recv().unwrap();
         assert!(v.ok && v.detail.contains("заряд 70 %"), "{v:?}");
         assert_eq!(h.svc.store.last_accepted().unwrap().unwrap().soc, Some(70));
 
         h.svc.clock.advance(MIN);
         let (tx, mut rx) = tokio::sync::oneshot::channel();
-        h.svc.cycle(None, vec![tx]).await;
+        h.svc.cycle(None, vec![tx], vec![]).await;
         let v = rx.try_recv().unwrap();
         assert!(!v.ok);
         assert_eq!((v.reason, v.advertising), (Some("unreachable"), Some(false)));
         assert_eq!(v.title, "Станция не видна по Bluetooth");
         let kinds: Vec<String> = h.svc.store.recent_events(10).unwrap().into_iter().map(|e| e.kind).collect();
         assert!(kinds.contains(&"check-ok".to_string()) && kinds.contains(&"check-failed".to_string()));
+    }
+
+    fn charging_request(
+        mode: ChargingMode,
+    ) -> (ChargingRequest, tokio::sync::oneshot::Receiver<ChargingView>) {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        (ChargingRequest { mode, reply }, rx)
+    }
+
+    #[tokio::test]
+    async fn charging_mode_written_then_read_back() {
+        let mut h = harness(vec![ok(70, 300)]);
+        h.svc.start();
+        h.svc.tick(None).await.unwrap();
+        assert_eq!(h.svc.now_view(h.svc.clock.now()).charging_mode, Some(ChargingMode::Standard));
+
+        // Из двух нажатий подряд пишется последнее, ответ получают оба.
+        let (a, mut ra) = charging_request(ChargingMode::Turbo);
+        let (b, mut rb) = charging_request(ChargingMode::Silent);
+        h.svc.cycle(None, vec![], vec![a, b]).await;
+        assert_eq!(h.svc.reader.writes, 1);
+        for v in [ra.try_recv().unwrap(), rb.try_recv().unwrap()] {
+            assert!(v.ok, "{v:?}");
+            assert_eq!(v.charging_mode, Some(ChargingMode::Silent));
+        }
+        assert_eq!(h.svc.now_view(h.svc.clock.now()).charging_mode, Some(ChargingMode::Silent));
+        let kinds: Vec<String> = h.svc.store.recent_events(10).unwrap().into_iter().map(|e| e.kind).collect();
+        assert!(kinds.contains(&"charging-mode".to_string()));
+    }
+
+    #[tokio::test]
+    async fn charging_mode_failure_and_dry_run_leave_station_alone() {
+        let mut h = harness(vec![ok(70, 300)]);
+        h.svc.reader.write_err = Some(MissReason::Timeout);
+        let (r, mut rx) = charging_request(ChargingMode::Turbo);
+        h.svc.cycle(None, vec![], vec![r]).await;
+        let v = rx.try_recv().unwrap();
+        assert!(!v.ok && v.text.contains("не изменён"), "{v:?}");
+        assert_eq!(v.charging_mode, Some(ChargingMode::Standard));
+        let kinds: Vec<String> = h.svc.store.recent_events(10).unwrap().into_iter().map(|e| e.kind).collect();
+        assert!(kinds.contains(&"action-failed".to_string()));
+
+        h.svc.reader.write_err = None;
+        h.svc.cfg.dry_run = true;
+        let (r, mut rx) = charging_request(ChargingMode::Turbo);
+        h.svc.cycle(None, vec![], vec![r]).await;
+        assert!(!rx.try_recv().unwrap().ok);
+        assert_eq!(h.svc.reader.writes, 1);
+        assert_eq!(h.svc.reader.charging, Some(ChargingMode::Standard));
     }
 
     #[tokio::test]
