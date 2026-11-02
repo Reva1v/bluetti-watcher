@@ -17,6 +17,7 @@ pub struct Config {
     pub eco: Eco,
     pub guards: Guards,
     pub dtek: Dtek,
+    pub charging_auto: ChargingAuto,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -81,6 +82,24 @@ pub struct Dtek {
     pub warn_min: u32,
 }
 
+/// `[charging_auto]`: смена режима зарядки по правилам (feature 004). Выключено: запись только по кнопке.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChargingAuto {
+    pub enabled: bool,
+    /// Свет включился, заряд ниже: «Турбо».
+    pub turbo_below: u8,
+    /// Заряд дошёл: «Стандартная».
+    pub standard_at: u8,
+    /// Заряд дошёл: «Тихая».
+    pub silent_at: u8,
+}
+
+impl Default for ChargingAuto {
+    fn default() -> Self {
+        Self { enabled: false, turbo_below: 20, standard_at: 50, silent_at: 80 }
+    }
+}
+
 impl Default for Dtek {
     fn default() -> Self {
         Self {
@@ -126,6 +145,7 @@ impl Default for Config {
             },
             guards: Guards { soc_rate_per_min: 5.0, soc_jump_floor: 3, max_gap_sec: 600 },
             dtek: Dtek::default(),
+            charging_auto: ChargingAuto::default(),
         }
     }
 }
@@ -240,6 +260,7 @@ pub fn parse(text: &str) -> Loaded {
             max_gap_sec: r.int(Some("guards"), "max_gap_sec", d.guards.max_gap_sec as i64, 120, 7200) as u32,
         },
         dtek: read_dtek(&mut r, &d.dtek),
+        charging_auto: read_charging_auto(&mut r, &d.charging_auto),
     };
 
     let mut config = config;
@@ -252,6 +273,24 @@ pub fn parse(text: &str) -> Loaded {
         config.levels = d.levels;
     }
     Loaded { config, warnings: w }
+}
+
+fn read_charging_auto(r: &mut Reader, d: &ChargingAuto) -> ChargingAuto {
+    let s = Some("charging_auto");
+    let c = ChargingAuto {
+        enabled: r.boolean(s, "enabled", d.enabled),
+        turbo_below: r.int(s, "turbo_below", d.turbo_below as i64, 0, 100) as u8,
+        standard_at: r.int(s, "standard_at", d.standard_at as i64, 1, 100) as u8,
+        silent_at: r.int(s, "silent_at", d.silent_at as i64, 1, 100) as u8,
+    };
+    if c.turbo_below <= c.standard_at && c.standard_at < c.silent_at {
+        return c;
+    }
+    r.warnings.push(format!(
+        "charging_auto: пороги должны идти turbo_below ≤ standard_at < silent_at (сейчас {}/{}/{}): взяты значения по умолчанию",
+        c.turbo_below, c.standard_at, c.silent_at
+    ));
+    ChargingAuto { enabled: c.enabled, ..d.clone() }
 }
 
 fn read_dtek(r: &mut Reader, d: &Dtek) -> Dtek {
@@ -516,5 +555,33 @@ url = \"http://example.org/k.json\"
     fn mac_round_trip() {
         let m = parse_mac("01-23-45-67-89-ab").unwrap();
         assert_eq!(format_mac(m), "01:23:45:67:89:AB");
+    }
+
+    #[test]
+    fn charging_auto_defaults_and_threshold_order() {
+        let d = parse("").config.charging_auto;
+        assert_eq!((d.enabled, d.turbo_below, d.standard_at, d.silent_at), (false, 20, 50, 80));
+
+        let c = parse(
+            "[charging_auto]
+enabled = true
+turbo_below = 10
+standard_at = 40
+silent_at = 90
+",
+        );
+        let a = &c.config.charging_auto;
+        assert_eq!((a.enabled, a.turbo_below, a.standard_at, a.silent_at), (true, 10, 40, 90));
+
+        // Порядок нарушен: пороги по умолчанию, включение остаётся.
+        let c = parse(
+            "[charging_auto]
+enabled = true
+standard_at = 90
+",
+        );
+        let a = &c.config.charging_auto;
+        assert_eq!((a.enabled, a.standard_at, a.silent_at), (true, 50, 80));
+        assert!(c.warnings.iter().any(|w| w.contains("charging_auto")), "{:?}", c.warnings);
     }
 }

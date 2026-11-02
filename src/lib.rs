@@ -17,5 +17,6 @@ pub mod paths;
 pub mod power;
 pub mod runtime;
 pub mod service;
+pub mod shutdown;
 pub mod store;
 pub mod window;

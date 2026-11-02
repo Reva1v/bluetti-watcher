@@ -135,6 +135,12 @@ address = ""                # caption on the card only
 queues = []                 # candidate queues, e.g. ["GPV9.1", "GPV21.1"]
 min_cut_min = 15            # shorter cuts do not count when picking the queue
 warn_min = 60               # Windows notification this many minutes before a planned cut (0 = off)
+
+[charging_auto]
+enabled = false             # charging mode by rules; on PC shutdown or restart: silent
+turbo_below = 20            # power is back and charge is below: turbo, otherwise standard
+standard_at = 50            # charge reached: standard
+silent_at = 80              # charge reached: silent
 ```
 
 Every key and its limits: [contracts/cli-config.md](specs/001-rust-station-watcher/contracts/cli-config.md); the

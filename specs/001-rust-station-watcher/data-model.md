@@ -32,7 +32,7 @@
 |---|---|---|
 | `id` | INTEGER PK | |
 | `ts` | INTEGER | |
-| `kind` | TEXT | `outage-start`, `outage-end`, `eco-on`, `eco-deep`, `eco-off`, `eco-part-failed`, `level-low`, `level-critical`, `hibernate-warn`, `hibernate`, `hibernate-refused`, `hibernate-delayed`, `mode-manual`, `action-failed`, `service-start` |
+| `kind` | TEXT | `outage-start`, `outage-end`, `eco-on`, `eco-deep`, `eco-off`, `eco-part-failed`, `level-low`, `level-critical`, `hibernate-warn`, `hibernate`, `hibernate-refused`, `hibernate-delayed`, `mode-manual`, `charging-mode`, `action-failed`, `service-start` |
 | `text` | TEXT | человекочитаемо, по-русски |
 | `data` | TEXT NULL | JSON с деталями (ватты, проценты, код ошибки) |
 
