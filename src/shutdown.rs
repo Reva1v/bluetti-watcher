@@ -21,7 +21,9 @@ use crate::service::ShutdownRequest;
 pub const HOLD: Duration = Duration::from_secs(15);
 /// Сигнал среди первых приложений; выше этого уровня без прав администратора нельзя.
 const SHUTDOWN_LEVEL: u32 = 0x3FF;
-const CLASS: PCWSTR = w!("BluettiWatcherShutdown");
+/// У тестов свой класс: `FindWindowW` иначе находит окно установленного сервиса, и тест выключает настоящий сервис.
+const CLASS: PCWSTR =
+    if cfg!(test) { w!("BluettiWatcherShutdownTest") } else { w!("BluettiWatcherShutdown") };
 
 static REQUESTS: OnceLock<UnboundedSender<ShutdownRequest>> = OnceLock::new();
 
