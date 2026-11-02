@@ -74,7 +74,7 @@ pub struct Seen {
 fn by_level(soc: u8, cfg: &config::ChargingAuto) -> ChargingMode {
     if soc < cfg.turbo_below {
         ChargingMode::Turbo
-    } else if soc >= cfg.silent_at {
+    } else if soc >= cfg.light_silent_at {
         ChargingMode::Silent
     } else {
         ChargingMode::Standard
@@ -200,7 +200,9 @@ mod tests {
             (20, Standard),
             (30, Standard),
             (31, Standard),
-            (79, Standard),
+            (74, Standard),
+            (75, Silent),
+            (79, Silent),
             (80, Silent),
             (100, Silent),
         ] {
@@ -210,6 +212,24 @@ mod tests {
             assert_eq!(w, Some(Want { mode: want, why: Why::Light { soc } }), "заряд {soc}");
             assert!(!a.light_pending);
         }
+    }
+
+    #[test]
+    fn near_full_light_keeps_silent_without_a_write() {
+        let mut a = after_outage();
+        assert_eq!(update(&mut a, on(77), Some(Silent), MIN, &cfg()), None);
+        assert_eq!(a.want, None);
+        // И порог 80 % ничего не пишет: режим уже стоит.
+        assert_eq!(update(&mut a, on(80), Some(Silent), 2 * MIN, &cfg()), None);
+    }
+
+    #[test]
+    fn charging_past_light_threshold_keeps_standard_until_silent_at() {
+        let mut a = after_outage();
+        assert_eq!(mode(update(&mut a, on(70), Some(Silent), MIN, &cfg())), Some(Standard));
+        report(&mut a, true, MIN);
+        assert_eq!(update(&mut a, on(77), Some(Standard), 2 * MIN, &cfg()), None);
+        assert_eq!(mode(update(&mut a, on(80), Some(Standard), 3 * MIN, &cfg())), Some(Silent));
     }
 
     #[test]
@@ -362,7 +382,13 @@ mod tests {
 
     #[test]
     fn custom_thresholds_are_used() {
-        let c = config::ChargingAuto { enabled: true, turbo_below: 10, standard_at: 40, silent_at: 90 };
+        let c = config::ChargingAuto {
+            enabled: true,
+            turbo_below: 10,
+            light_silent_at: 85,
+            standard_at: 40,
+            silent_at: 90,
+        };
         let mut a = after_outage();
         assert_eq!(mode(update(&mut a, on(15), Some(Silent), MIN, &c)), Some(Standard));
         report(&mut a, true, MIN);

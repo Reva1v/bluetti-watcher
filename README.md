@@ -139,6 +139,7 @@ warn_min = 60               # Windows notification this many minutes before a pl
 [charging_auto]
 enabled = false             # charging mode by rules; on PC shutdown or restart: silent
 turbo_below = 20            # power is back and charge is below: turbo, otherwise standard
+light_silent_at = 75        # power is back and charge is at least: silent
 standard_at = 50            # charge reached: standard
 silent_at = 80              # charge reached: silent
 ```

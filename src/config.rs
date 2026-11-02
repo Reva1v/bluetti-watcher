@@ -88,6 +88,8 @@ pub struct ChargingAuto {
     pub enabled: bool,
     /// Свет включился, заряд ниже: «Турбо».
     pub turbo_below: u8,
+    /// Свет включился, заряд не ниже: «Тихая», а не «Стандартная» ради последних процентов до `silent_at`.
+    pub light_silent_at: u8,
     /// Заряд дошёл: «Стандартная».
     pub standard_at: u8,
     /// Заряд дошёл: «Тихая».
@@ -96,7 +98,7 @@ pub struct ChargingAuto {
 
 impl Default for ChargingAuto {
     fn default() -> Self {
-        Self { enabled: false, turbo_below: 20, standard_at: 50, silent_at: 80 }
+        Self { enabled: false, turbo_below: 20, light_silent_at: 75, standard_at: 50, silent_at: 80 }
     }
 }
 
@@ -280,15 +282,20 @@ fn read_charging_auto(r: &mut Reader, d: &ChargingAuto) -> ChargingAuto {
     let c = ChargingAuto {
         enabled: r.boolean(s, "enabled", d.enabled),
         turbo_below: r.int(s, "turbo_below", d.turbo_below as i64, 0, 100) as u8,
+        light_silent_at: r.int(s, "light_silent_at", d.light_silent_at as i64, 1, 100) as u8,
         standard_at: r.int(s, "standard_at", d.standard_at as i64, 1, 100) as u8,
         silent_at: r.int(s, "silent_at", d.silent_at as i64, 1, 100) as u8,
     };
-    if c.turbo_below <= c.standard_at && c.standard_at < c.silent_at {
+    if c.turbo_below <= c.standard_at
+        && c.standard_at < c.silent_at
+        && c.turbo_below < c.light_silent_at
+        && c.light_silent_at <= c.silent_at
+    {
         return c;
     }
     r.warnings.push(format!(
-        "charging_auto: пороги должны идти turbo_below ≤ standard_at < silent_at (сейчас {}/{}/{}): взяты значения по умолчанию",
-        c.turbo_below, c.standard_at, c.silent_at
+        "charging_auto: пороги должны идти turbo_below ≤ standard_at < silent_at и turbo_below < light_silent_at ≤ silent_at (сейчас {}/{}/{}/{}): взяты значения по умолчанию",
+        c.turbo_below, c.light_silent_at, c.standard_at, c.silent_at
     ));
     ChargingAuto { enabled: c.enabled, ..d.clone() }
 }
@@ -561,6 +568,7 @@ url = \"http://example.org/k.json\"
     fn charging_auto_defaults_and_threshold_order() {
         let d = parse("").config.charging_auto;
         assert_eq!((d.enabled, d.turbo_below, d.standard_at, d.silent_at), (false, 20, 50, 80));
+        assert_eq!(d.light_silent_at, 75);
 
         let c = parse(
             "[charging_auto]

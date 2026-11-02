@@ -39,8 +39,8 @@
   - `ShutdownBlockReasonCreate`, отправка запроса сервису, `recv_timeout(15 с)`, `ShutdownBlockReasonDestroy`, ответ `TRUE`.
   - Сон и гибернацию окно не обрабатывает (FR-004).
   - Новые features `windows`: `Win32_System_Shutdown`, `Win32_Graphics_Gdi`. Новых зависимостей нет.
-- **Конфиг** `[charging_auto]`: `enabled = false`, `turbo_below = 20`, `standard_at = 50`, `silent_at = 80`. Нарушен порядок
-  `turbo_below ≤ standard_at < silent_at` — значения по умолчанию и предупреждение.
+- **Конфиг** `[charging_auto]`: `enabled = false`, `turbo_below = 20`, `light_silent_at = 75`, `standard_at = 50`, `silent_at = 80`. Нарушен порядок
+  `turbo_below ≤ standard_at < silent_at` или `turbo_below < light_silent_at ≤ silent_at` — значения по умолчанию и предупреждение.
 - **Дашборд** не меняется: чип показывает прочитанный режим, события идут в историю.
 
 ## Исследование
@@ -58,11 +58,12 @@
 [charging_auto]
 enabled = true     # по умолчанию false: запись только по кнопке
 turbo_below = 20   # свет включился, заряд ниже: «Турбо»
+light_silent_at = 75  # свет включился, заряд не ниже: «Тихая»
 standard_at = 50   # заряд дошёл: «Стандартная»
 silent_at = 80     # заряд дошёл: «Тихая»
 ```
 
-При включении света заряд от `turbo_below` до `silent_at` даёт «Стандартная», от `silent_at` — «Тихая».
+При включении света заряд от `turbo_below` до `light_silent_at` даёт «Стандартная», от `light_silent_at` — «Тихая».
 
 ## Конституция
 
@@ -75,7 +76,7 @@ silent_at = 80     # заряд дошёл: «Тихая»
 
 ## Тесты
 
-- `decision/charging`: все сценарии спеки: границы 19/20/79/80, порядок 15 → 50 → 80 (ровно три режима), качание у порога,
+- `decision/charging`: все сценарии спеки: границы 19/20/74/75, порядок 15 → 50 → 80 (ровно три режима), качание у порога,
   блик сети, рост без сети, совпадение с текущим режимом, неизвестный режим, бэкофф, `manual`, пауза после `shutdown`,
   перезапуск (состояние через JSON), запуск после выключения.
 - `service`: запись по порогу и отсутствие записи при `enabled = false`; отвергнутое показание не пишет; `--dry-run`;

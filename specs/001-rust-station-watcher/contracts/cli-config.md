@@ -70,4 +70,4 @@ max_gap_sec = 600
 ## `[charging_auto]` (feature 004)
 
 Режим зарядки по правилам, контракт и смысл порогов — [specs/004-charging-auto/plan.md](../../004-charging-auto/plan.md).
-Ключи: `enabled` (false), `turbo_below` (20, 0–100), `standard_at` (50, 1–100), `silent_at` (80, 1–100). Порядок `turbo_below ≤ standard_at < silent_at`, иначе пороги по умолчанию и предупреждение.
+Ключи: `enabled` (false), `turbo_below` (20, 0–100), `light_silent_at` (75, 1–100), `standard_at` (50, 1–100), `silent_at` (80, 1–100). Порядок `turbo_below ≤ standard_at < silent_at` и `turbo_below < light_silent_at ≤ silent_at`, иначе пороги по умолчанию и предупреждение.
