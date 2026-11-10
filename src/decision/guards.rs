@@ -79,7 +79,7 @@ pub fn starts_over(s: &DecisionState, now: Ts, cfg: &Config) -> bool {
         .is_some_and(|l| now < l.ts || now - l.ts > Ts::from(cfg.guards.max_gap_sec) * SEC)
 }
 
-/// Сброс по пропуску или часам назад. Остаются: ручной выбор, eco, бэкофф, база правдоподобия, запомненный rebase
+/// Сброс по пропуску или часам назад. Остаются: ручной выбор, eco, переключатели и затемнение, бэкофф, база правдоподобия, запомненный rebase
 /// (часы назад переносят его на `now`), гибернация для правила пробуждения и сам факт отключения — найти его снова
 /// после пропуска не смена сети. Таймеры сети, серии и уровни начинаются заново.
 pub fn reset(s: &mut DecisionState, now: Ts) {
@@ -91,6 +91,9 @@ pub fn reset(s: &mut DecisionState, now: Ts) {
         manual_at: old.manual_at,
         eco: old.eco,
         eco_applied: old.eco_applied,
+        boost: old.boost,
+        dim: old.dim,
+        dim_applied: old.dim_applied,
         backoff: old.backoff,
         rebase_at: if backward { old.rebase_at.map(|_| now) } else { old.rebase_at },
         delay_noted: old.delay_noted,
@@ -98,7 +101,8 @@ pub fn reset(s: &mut DecisionState, now: Ts) {
         outage: old.outage.map(|o| Outage {
             start_ts: o.start_ts,
             soc_start: o.soc_start,
-            deep: o.deep,
+            strong_fired: o.strong_fired,
+            max_fired: o.max_fired,
             confirmed: false,
             ..Default::default()
         }),
@@ -247,13 +251,19 @@ mod tests {
         s.manual_at = Some(5 * MIN);
         s.mains_run_ms = 5 * MIN;
         s.rebase_at = Some(9 * MIN);
-        s.outage = Some(Outage { start_ts: MIN, confirmed: true, deep: true, ..Default::default() });
+        s.outage = Some(Outage { start_ts: MIN, confirmed: true, ..Default::default() });
+        s.boost.max = crate::decision::Switch { on: true, auto: true };
+        s.boost.dim_off = true;
+        s.dim = crate::model::Dim::All;
+        s.dim_applied = crate::model::Dim::All;
         reset(&mut s, 5 * MIN);
         assert_eq!(s.manual, crate::model::ManualMode::Max);
         assert_eq!(s.mains_run_ms, 0);
         assert_eq!(s.rebase_at, Some(5 * MIN), "часы назад переносят rebase на now");
         let o = s.outage.unwrap();
-        assert!(!o.confirmed && o.deep && o.start_ts == MIN);
+        assert!(!o.confirmed && o.start_ts == MIN);
+        assert!(s.boost.max.on && s.boost.dim_off, "переключатели переживают сброс по пропуску");
+        assert_eq!((s.dim, s.dim_applied), (crate::model::Dim::All, crate::model::Dim::All));
     }
 
     #[test]

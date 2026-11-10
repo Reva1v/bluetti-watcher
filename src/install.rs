@@ -202,7 +202,8 @@ pub fn status_line(health: Option<&serde_json::Value>, now: Option<&serde_json::
     });
     let eco = match now["eco"].as_str() {
         Some("eco") => "да",
-        Some("deep") => "глубокий",
+        Some("strong") => "сильный",
+        Some("deep") => "максимальный",
         _ => "нет",
     };
     parts.push(format!("eco: {eco}"));
@@ -1327,7 +1328,13 @@ mod tests {
                          "eco": "deep", "manual": "max", "dryRun": true});
         assert_eq!(
             status_line(Some(&h), Some(&now)),
-            "сервис: работает | сеть: нет | заряд 40 % | eco: глубокий | режим: максимум | показание 19:00 (устарело) | dry run"
+            "сервис: работает | сеть: нет | заряд 40 % | eco: максимальный | режим: максимум | показание 19:00 (устарело) | dry run"
+        );
+        let now = json!({"ts": "2026-10-14T21:05:00+03:00", "stale": false, "soc": 45, "mains": "off",
+                         "eco": "strong", "manual": "auto", "dryRun": false});
+        assert_eq!(
+            status_line(Some(&h), Some(&now)),
+            "сервис: работает | сеть: нет | заряд 45 % | eco: сильный | показание 21:05"
         );
         let now = json!({"ts": null, "soc": null, "mains": "unknown", "eco": "none"});
         assert_eq!(

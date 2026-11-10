@@ -133,6 +133,30 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .seg button:hover { background: #222; }
 .seg button.effective { background: rgba(255, 111, 26, 0.18); color: var(--accent); }
 .seg button[aria-pressed="true"] { background: var(--accent); color: #160900; font-weight: 600; }
+/* «Сильный Eco» и «Максимальный Eco»: два независимых переключателя, могут быть включены оба */
+.boosts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.tog {
+  min-height: 40px; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--ground); color: var(--soft);
+  font: 500 14px var(--sans);
+}
+.tog:hover { background: #222; }
+.tog[aria-pressed="true"] { border-color: var(--accent); background: rgba(255, 111, 26, 0.18); color: var(--accent); font-weight: 600; }
+.auto-tag {
+  padding: 0 7px; border-radius: 999px; background: rgba(255, 111, 26, 0.25); color: var(--accent);
+  font: 500 11px var(--mono);
+}
+.sw {
+  display: inline-flex; align-items: center; gap: 10px; align-self: flex-start; padding: 2px 0;
+  border: 0; background: none; color: var(--soft); font: 500 14px var(--sans);
+}
+.sw-box { position: relative; flex: 0 0 auto; width: 34px; height: 20px; border-radius: 999px; background: #3A3A3A; transition: background 0.15s; }
+.sw-box::after {
+  content: ''; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%;
+  background: var(--soft); transition: transform 0.15s;
+}
+.sw[aria-checked="true"] .sw-box { background: var(--accent); }
+.sw[aria-checked="true"] .sw-box::after { transform: translateX(14px); background: #160900; }
 .mode-text { display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
 .mode-title { font-weight: 600; color: var(--warn); }
 

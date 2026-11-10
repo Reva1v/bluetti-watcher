@@ -37,7 +37,7 @@ pub mod text {
         format!("Заряд {soc} % — сохраните работу")
     }
     pub fn deep_eco(soc: u8) -> String {
-        format!("Заряд {soc} % — включён глубокий eco")
+        format!("Заряд {soc} % — включён Максимальный Eco")
     }
     pub const NO_HIBERNATION: &str = "Гибернация выключена: при разряде станции ПК не уснёт сам";
 }

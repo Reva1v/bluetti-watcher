@@ -148,6 +148,26 @@ fn eco_to_deep_keeps_restore_and_lowers_cpu() {
 }
 
 #[test]
+fn strong_uses_its_own_cpu_limit_and_gpu_word() {
+    let mut pc = control(Fake::new());
+    let (r1, parts) = pc.apply(EcoLevel::Strong, None);
+    assert!(failed(&parts).is_empty(), "{parts:?}");
+    assert!(parts.iter().any(|p| p.part == "cpu" && p.detail.contains("65")), "{parts:?}");
+    let (r2, _) = pc.apply(EcoLevel::Deep, r1.clone());
+    assert_eq!(r1, r2, "сильный и максимальный делят одно сохранённое состояние");
+    let (_, _) = pc.apply(EcoLevel::Eco, r2.clone());
+    let b = pc.backend();
+    let cpu: Vec<u32> = b.values.iter().filter(|(_, s, _)| s == PROCTHROTTLEMAX).map(|v| v.2).collect();
+    assert_eq!(cpu, [65, 50, 80]);
+    assert_eq!(b.gpu, vec![EcoLevel::Strong, EcoLevel::Deep, EcoLevel::Eco]);
+    // Снятие сильного уровня возвращает всё.
+    let (r3, _) = pc.apply(EcoLevel::Strong, None);
+    let (after, parts) = pc.apply(EcoLevel::None, r3);
+    assert_eq!(after, None);
+    assert!(failed(&parts).is_empty());
+}
+
+#[test]
 fn restore_returns_everything_and_clears_state() {
     let mut pc = control(Fake::new());
     let (r, _) = pc.apply(EcoLevel::Eco, None);

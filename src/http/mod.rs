@@ -21,14 +21,15 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use crate::ble::ac180p::ChargingMode;
 use crate::clock::{Clock, MIN, SystemClock, Ts, to_local_iso};
+use crate::decision::{BoostRequest, Switch};
 use crate::dtek::DtekView;
-use crate::model::{EcoLevel, Mains, ManualMode};
+use crate::model::{Dim, EcoLevel, Mains, ManualMode};
 use crate::runtime::Source;
 use crate::store::{self, Range, Store};
 
 mod assets;
 
-/// Заголовок, без которого `POST /api/mode`, `/api/check` и `/api/charging` отвергаются (форма с чужого сайта его не пошлёт).
+/// Заголовок, без которого `POST /api/mode`, `/api/boost`, `/api/check` и `/api/charging` отвергаются (форма с чужого сайта его не пошлёт).
 pub const MODE_HEADER: &str = "x-bluetti-watcher";
 
 /// Тело `/api/now` и `event: now`.
@@ -48,6 +49,10 @@ pub struct NowView {
     pub eco_at: Option<String>,
     pub eco: EcoLevel,
     pub manual: ManualMode,
+    /// Переключатели «Сильный Eco», «Максимальный Eco» и «Гасить мониторы».
+    pub boost: BoostView,
+    /// Что затемнено сейчас; `secondary` — основной монитор не затемнён из-за игры.
+    pub dimmed: Dim,
     /// Режим зарядки станции по последнему чтению; `None` — ещё не прочитан или незнакомый.
     pub charging_mode: Option<ChargingMode>,
     pub hours_left: Option<f64>,
@@ -65,6 +70,14 @@ pub struct NowView {
     pub dry_run: bool,
     pub last_error: Option<ErrorView>,
     pub station: StationView,
+}
+
+/// Состояние переключателей; `dim` — «Гасить мониторы» включено.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct BoostView {
+    pub strong: Switch,
+    pub max: Switch,
+    pub dim: bool,
 }
 
 /// Постоянные данные станции и порогов из конфига — чтобы страница ничего не зашивала.
@@ -154,6 +167,7 @@ pub struct AppState {
     /// Сервис шлёт сюда новые события.
     pub events: broadcast::Sender<store::Event>,
     pub mode_tx: mpsc::UnboundedSender<ManualMode>,
+    pub boost_tx: mpsc::UnboundedSender<BoostRequest>,
     pub check_tx: mpsc::UnboundedSender<CheckRequest>,
     pub charging_tx: mpsc::UnboundedSender<ChargingRequest>,
     pub health: watch::Receiver<HealthView>,
@@ -207,6 +221,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/events", get(events))
         .route("/api/stream", get(stream))
         .route("/api/mode", post(mode))
+        .route("/api/boost", post(boost))
         .route("/api/check", post(check))
         .route("/api/charging", post(charging))
         .route("/api/health", get(health))
@@ -392,6 +407,36 @@ async fn mode(State(s): St, headers: HeaderMap, body: Bytes) -> Response {
     (StatusCode::ACCEPTED, Json(ModeReply { manual: mode })).into_response()
 }
 
+/// Тело `POST /api/boost`: ровно один ключ — `strong`, `max` или `dim`, значение — `true`/`false`.
+fn parse_boost(body: &[u8]) -> Option<(BoostRequest, serde_json::Value)> {
+    let serde_json::Value::Object(map) = serde_json::from_slice(body).ok()? else { return None };
+    let mut it = map.iter();
+    let ((key, value), None) = (it.next()?, it.next()) else { return None };
+    let on = value.as_bool()?;
+    let req = match key.as_str() {
+        "strong" => BoostRequest::Strong(on),
+        "max" => BoostRequest::Max(on),
+        "dim" => BoostRequest::Dim(on),
+        _ => return None,
+    };
+    Some((req, serde_json::Value::Object(map)))
+}
+
+/// Включить или выключить «Сильный Eco», «Максимальный Eco» или «Гасить мониторы»; выбор режима не меняется.
+async fn boost(State(s): St, headers: HeaderMap, body: Bytes) -> Response {
+    if headers.get(MODE_HEADER).is_none_or(|v| v.as_bytes() != b"1") {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some((req, reply)) = parse_boost(&body) else {
+        return (StatusCode::BAD_REQUEST, "тело: ровно один ключ strong | max | dim со значением true/false")
+            .into_response();
+    };
+    if s.app.boost_tx.send(req).is_err() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "сервис не принимает команды").into_response();
+    }
+    (StatusCode::ACCEPTED, Json(reply)).into_response()
+}
+
 /// Внеочередное чтение станции. Ждёт текущий цикл, само чтение и, при неудаче, короткий скан BLE.
 async fn check(State(s): St, headers: HeaderMap) -> Response {
     if headers.get(MODE_HEADER).is_none_or(|v| v.as_bytes() != b"1") {
@@ -456,6 +501,7 @@ mod tests {
     struct Env {
         app: Router,
         mode_rx: mpsc::UnboundedReceiver<ManualMode>,
+        boost_rx: mpsc::UnboundedReceiver<BoostRequest>,
         check_rx: mpsc::UnboundedReceiver<CheckRequest>,
         charging_rx: mpsc::UnboundedReceiver<ChargingRequest>,
         now_tx: watch::Sender<NowView>,
@@ -506,6 +552,7 @@ mod tests {
             watch::channel(HealthView { ok: true, version: "0.1.0".into(), ..Default::default() });
         let (events, _) = broadcast::channel(16);
         let (mode_tx, mode_rx) = mpsc::unbounded_channel();
+        let (boost_tx, boost_rx) = mpsc::unbounded_channel();
         let (check_tx, check_rx) = mpsc::unbounded_channel();
         let (charging_tx, charging_rx) = mpsc::unbounded_channel();
         let (dtek_tx, dtek_rx) = watch::channel(DtekView::disabled());
@@ -515,12 +562,24 @@ mod tests {
             now: now_rx,
             events: events.clone(),
             mode_tx,
+            boost_tx,
             check_tx,
             charging_tx,
             health: health_rx,
             dtek: dtek_rx,
         });
-        Env { app, mode_rx, check_rx, charging_rx, now_tx, events, _health_tx: health_tx, dtek_tx, dir }
+        Env {
+            app,
+            mode_rx,
+            boost_rx,
+            check_rx,
+            charging_rx,
+            now_tx,
+            events,
+            _health_tx: health_tx,
+            dtek_tx,
+            dir,
+        }
     }
 
     fn req(method: Method, uri: &str, host: Option<&str>) -> axum::http::request::Builder {
@@ -585,6 +644,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dashboard_has_the_boost_controls_and_new_names() {
+        let e = env("dash");
+        let text = |uri: &'static str| {
+            let app = e.app.clone();
+            async move {
+                let r = req(Method::GET, uri, Some("127.0.0.1:8765")).body(Body::empty()).unwrap();
+                let b = to_bytes(app.oneshot(r).await.unwrap().into_body(), 1 << 20).await.unwrap();
+                String::from_utf8(b.to_vec()).unwrap()
+            }
+        };
+        let (html, js, css) = (text("/").await, text("/app.js").await, text("/style.css").await);
+        for needle in [
+            "data-boost=\"strong\"",
+            "data-boost=\"max\"",
+            "id=\"dim-sw\"",
+            "Сильный Eco",
+            "Максимальный Eco",
+            "Гасить мониторы",
+            "авто",
+        ] {
+            assert!(html.contains(needle), "index.html без {needle}");
+        }
+        assert!(
+            html.contains("data-mode=\"auto\"") && html.contains("data-mode=\"max\""),
+            "сегмент режима на месте"
+        );
+        assert!(js.contains("/api/boost") && js.contains("основной монитор не затемнён"));
+        assert!(css.contains(".tog") && css.contains(".sw"));
+        for old in ["глубокий eco", "Глубокий eco"] {
+            assert!(!js.contains(old) && !html.contains(old), "осталось «{old}»");
+        }
+    }
+
+    #[tokio::test]
     async fn mode_needs_header_and_valid_body() {
         let mut e = env("mode");
         let post = |hdr: bool, body: &str| {
@@ -602,6 +695,53 @@ mod tests {
         let (st, v) = call(&e.app, post(true, r#"{"mode":"max"}"#)).await;
         assert_eq!((st, v), (StatusCode::ACCEPTED, json!({ "manual": "max" })));
         assert_eq!(e.mode_rx.try_recv().unwrap(), ManualMode::Max);
+    }
+
+    #[tokio::test]
+    async fn boost_needs_header_and_exactly_one_valid_key() {
+        let mut e = env("boost");
+        let post = |hdr: bool, body: &str| {
+            let mut b = req(Method::POST, "/api/boost", Some("127.0.0.1:8765"))
+                .header(header::CONTENT_TYPE, "application/json");
+            if hdr {
+                b = b.header("X-Bluetti-Watcher", "1");
+            }
+            b.body(Body::from(body.to_string())).unwrap()
+        };
+        assert_eq!(call(&e.app, post(false, r#"{"strong":true}"#)).await.0, StatusCode::FORBIDDEN);
+        for bad in [
+            "{}",
+            "not json",
+            "[]",
+            "true",
+            r#"{"strong":true,"max":false}"#,
+            r#"{"strong":true,"dim":true}"#,
+            r#"{"strong":1}"#,
+            r#"{"strong":"true"}"#,
+            r#"{"strong":null}"#,
+            r#"{"deep":true}"#,
+            r#"{"mode":"max"}"#,
+        ] {
+            assert_eq!(call(&e.app, post(true, bad)).await.0, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        assert!(e.boost_rx.try_recv().is_err(), "отвергнутые тела ничего не доставляют");
+        for (body, want) in [
+            (r#"{"strong":true}"#, BoostRequest::Strong(true)),
+            (r#"{"max":false}"#, BoostRequest::Max(false)),
+            (r#"{"dim":false}"#, BoostRequest::Dim(false)),
+            (r#"{"dim":true}"#, BoostRequest::Dim(true)),
+        ] {
+            let (st, v) = call(&e.app, post(true, body)).await;
+            assert_eq!(st, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(v, serde_json::from_str::<Value>(body).unwrap(), "ответ — то же тело");
+            assert_eq!(e.boost_rx.try_recv().unwrap(), want);
+        }
+        assert!(e.boost_rx.try_recv().is_err());
+        // Выбор режима не затронут: канал режима молчит.
+        assert!(e.mode_rx.try_recv().is_err());
+        // Сервис не слушает — 503.
+        e.boost_rx.close();
+        assert_eq!(call(&e.app, post(true, r#"{"strong":true}"#)).await.0, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
@@ -681,6 +821,8 @@ mod tests {
             "ecoAt",
             "eco",
             "manual",
+            "boost",
+            "dimmed",
             "chargingMode",
             "hoursLeft",
             "runtimeSource",
@@ -705,6 +847,28 @@ mod tests {
         assert_eq!(v["manual"], "auto");
         assert_eq!(v["dryRun"], true);
         assert_eq!(v["levels"], json!({ "low": false, "critical": false, "warn": false }));
+        assert_eq!(
+            v["boost"],
+            json!({ "strong": { "on": false, "auto": false }, "max": { "on": false, "auto": false }, "dim": false })
+        );
+        assert_eq!(v["dimmed"], "none");
+        let shown = NowView {
+            boost: BoostView {
+                strong: Switch { on: true, auto: true },
+                max: Switch { on: true, auto: false },
+                dim: true,
+            },
+            dimmed: Dim::Secondary,
+            eco: EcoLevel::Strong,
+            ..Default::default()
+        };
+        let v = serde_json::to_value(shown).unwrap();
+        assert_eq!(v["boost"]["strong"], json!({ "on": true, "auto": true }));
+        assert_eq!(v["boost"]["max"], json!({ "on": true, "auto": false }));
+        assert_eq!(
+            (v["boost"]["dim"].as_bool(), v["dimmed"].as_str(), v["eco"].as_str()),
+            (Some(true), Some("secondary"), Some("strong"))
+        );
 
         let full = NowView {
             outage: Some(OutageView { since: to_local_iso(0), soc_start: Some(98) }),

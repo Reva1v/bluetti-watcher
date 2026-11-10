@@ -10,13 +10,15 @@ use crate::ble::{ReadOptions, ReadOutcome};
 use crate::clock::{Clock, MIN, SEC, Ts, to_local_iso};
 use crate::config::Config;
 use crate::decision::charging::{self, ChargingAuto, Seen, Want, Why};
-use crate::decision::{self, Action, DecisionState, Input};
+use crate::decision::{self, Action, BoostRequest, DecisionState, Input};
 use crate::http::{
-    ChargingRequest, ChargingView, CheckRequest, CheckView, ErrorView, HealthView, LevelsView, NowView,
-    OutageView, StationView,
+    BoostView, ChargingRequest, ChargingView, CheckRequest, CheckView, ErrorView, HealthView, LevelsView,
+    NowView, OutageView, StationView,
 };
-use crate::model::{EcoLevel, ManualMode, MissReason, ReadStatus, Reading};
+use crate::model::{Dim, EcoLevel, ManualMode, MissReason, ReadStatus, Reading};
 use crate::notify::Notifier;
+use crate::power::brightness::{self, Brightness, DimRestore};
+use crate::power::games::Games;
 use crate::power::hibernate::Hibernator;
 use crate::power::{PowerBackend, PowerControl, PowerRestore};
 use crate::store::{self, Store};
@@ -102,6 +104,8 @@ pub struct Channels {
     pub health: watch::Sender<HealthView>,
     pub events: broadcast::Sender<store::Event>,
     pub modes: mpsc::UnboundedReceiver<ManualMode>,
+    /// Кнопки «Сильный Eco», «Максимальный Eco» и «Гасить мониторы».
+    pub boosts: mpsc::UnboundedReceiver<BoostRequest>,
     /// Кнопка «Проверить подключение сейчас».
     pub checks: mpsc::UnboundedReceiver<CheckRequest>,
     /// Кнопки режима зарядки станции.
@@ -120,9 +124,15 @@ pub struct Service<R: StationReader, C: Clock, B: PowerBackend> {
     pub power: PowerControl<B>,
     pub hibernator: Box<dyn Hibernator>,
     pub notifier: Box<dyn Notifier>,
+    /// Яркость мониторов: настоящая в проде, поддельная в тестах.
+    pub brightness: Box<dyn Brightness>,
+    /// Запущена ли игра.
+    pub games: Box<dyn Games>,
     pub kill_switch: PathBuf,
     pub state: DecisionState,
     channels: Channels,
+    /// Нажатия переключателей, дошедшие до `decide`.
+    boosts: Vec<BoostRequest>,
     encryption: Option<bool>,
     last_purge: Ts,
     last_error: Option<(Ts, String)>,
@@ -132,6 +142,8 @@ pub struct Service<R: StationReader, C: Clock, B: PowerBackend> {
     charging_mode: Option<ChargingMode>,
     /// Состояние правил режима зарядки (feature 004).
     auto: ChargingAuto,
+    /// Причина записи по правилу в текущем цикле: ответ на нажатие объясняет, почему режим уже другой.
+    rule_note: Option<String>,
 }
 
 impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
@@ -144,6 +156,8 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
         power: PowerControl<B>,
         hibernator: Box<dyn Hibernator>,
         notifier: Box<dyn Notifier>,
+        brightness: Box<dyn Brightness>,
+        games: Box<dyn Games>,
         kill_switch: PathBuf,
         channels: Channels,
     ) -> Self {
@@ -160,9 +174,12 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
             power,
             hibernator,
             notifier,
+            brightness,
+            games,
             kill_switch,
             state,
             channels,
+            boosts: Vec::new(),
             encryption,
             last_purge: 0,
             last_error: None,
@@ -170,6 +187,7 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
             last_learn,
             charging_mode: None,
             auto,
+            rule_note: None,
         }
     }
 
@@ -188,6 +206,12 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
         if saved.is_some() && self.state.eco == EcoLevel::None {
             tracing::info!("возврат настроек питания после перезапуска");
             self.set_eco(now, EcoLevel::None);
+        }
+        // Так же с яркостью: мониторы остались затемнёнными, а решение затемнения уже не хочет.
+        if self.state.dim == Dim::None && self.store.get_meta::<DimRestore>("dim_restore").is_some() {
+            tracing::info!("возврат яркости мониторов после перезапуска");
+            let ok = self.set_dim(now, Dim::None);
+            decision::report(&mut self.state, &Action::SetDim(Dim::None), ok, now);
         }
         if !self.hibernator.available() {
             tracing::warn!("гибернация в Windows выключена");
@@ -246,6 +270,7 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
                 }
                 _ = ticker.tick() => false,
                 Some(m) = self.channels.modes.recv() => { manual = Some(m); true }
+                Some(b) = self.channels.boosts.recv() => { self.boosts.push(b); true }
                 Some(c) = self.channels.checks.recv() => { checks.push(c); true }
                 Some(c) = self.channels.charging.recv() => { charging.push(c); true }
             };
@@ -281,6 +306,7 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
         charging: Vec<ChargingRequest>,
     ) {
         let started = std::time::Instant::now();
+        self.rule_note = None;
         let written = match charging.last() {
             Some(c) => {
                 charging::manual(&mut self.auto);
@@ -390,6 +416,7 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
         match self.reader.write_charging_mode(self.encryption, w.mode).await {
             Ok(()) => {
                 self.charging_mode = Some(w.mode);
+                self.rule_note = Some(why.clone());
                 let data = serde_json::json!({ "mode": w.mode, "reason": w.why.code() }).to_string();
                 self.event(
                     ts,
@@ -435,7 +462,12 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
     fn charging_view(&self, mode: ChargingMode, result: Result<(), String>) -> ChargingView {
         let (ok, text) = match result {
             Ok(()) if self.charging_mode == Some(mode) => (true, format!("Режим зарядки: {}", mode.title())),
-            Ok(()) => (false, "Станция приняла команду, но показывает другой режим".to_string()),
+            Ok(()) => match (&self.rule_note, self.charging_mode) {
+                (Some(why), Some(now)) => {
+                    (false, format!("Автоматика вернула режим «{}»: {why}", now.title()))
+                }
+                _ => (false, "Станция приняла команду, но показывает другой режим".to_string()),
+            },
             Err(e) => (false, format!("Режим зарядки не изменён: {e}")),
         };
         ChargingView { ok, text, charging_mode: self.charging_mode }
@@ -467,11 +499,17 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
         fresh: bool,
         manual: Option<ManualMode>,
     ) -> (ReadStatus, Vec<Action>) {
+        while let Ok(b) = self.channels.boosts.try_recv() {
+            self.boosts.push(b);
+        }
         let input = Input {
             reading: reading.clone(),
             fresh,
             kill_switch: self.kill_switch.exists(),
             manual_request: manual,
+            boost_requests: std::mem::take(&mut self.boosts),
+            // Перед каждым решением: иначе в цикле, где уровень включается, основной монитор успел бы погаснуть.
+            game_running: self.cfg.eco.dim_skip_games && self.games.running(),
         };
         let d = decision::decide(&mut self.state, &input, ts, &self.cfg);
         match &reading {
@@ -494,6 +532,10 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
             match &a {
                 Action::SetEco(level) => {
                     let ok = self.set_eco(ts, *level);
+                    decision::report(&mut self.state, &a, ok, ts);
+                }
+                Action::SetDim(target) => {
+                    let ok = self.set_dim(ts, *target);
                     decision::report(&mut self.state, &a, ok, ts);
                 }
                 Action::Notify { text, .. } => {
@@ -558,7 +600,8 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
         let (kind, title) = match level {
             EcoLevel::None => ("eco-off", "Eco снят"),
             EcoLevel::Eco => ("eco-on", "Eco включён"),
-            EcoLevel::Deep => ("eco-deep", "Глубокий eco включён"),
+            EcoLevel::Strong => ("eco-strong", "Сильный Eco включён"),
+            EcoLevel::Deep => ("eco-deep", "Максимальный Eco включён"),
         };
         let ok = parts.is_empty() || !done.is_empty();
         if ok {
@@ -572,6 +615,58 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
             self.fail(ts, format!("{title} — не удалось ни одной части"));
         }
         ok
+    }
+
+    /// Затемнить мониторы или вернуть их яркость; `true` — ни одна запись не отказала. Прежняя яркость сохраняется
+    /// в `meta.dim_restore` до первой записи и удаляется после возврата.
+    fn set_dim(&mut self, ts: Ts, target: Dim) -> bool {
+        // «Гасить мониторы» выключено в конфиге: затемнять нечем, но уже затемнённое возвращается.
+        if !self.cfg.eco.dim && target != Dim::None {
+            return true;
+        }
+        let prev = self.state.dim_applied;
+        let saved = self.store.get_meta::<DimRestore>("dim_restore");
+        let store = &self.store;
+        let (restore, parts) = brightness::apply(
+            &mut *self.brightness,
+            target,
+            saved,
+            self.cfg.eco.dim_pct,
+            self.cfg.dry_run,
+            &mut |r| log_db(store.set_meta("dim_restore", r)),
+        );
+        match &restore {
+            Some(r) => log_db(self.store.set_meta("dim_restore", r)),
+            None => log_db(self.store.delete_meta("dim_restore")),
+        }
+        for p in parts.iter().filter(|p| !p.ok) {
+            self.event(ts, "eco-part-failed", p.detail.clone(), Some(format!("{{\"part\":\"{}\"}}", p.part)));
+        }
+        let done: Vec<&str> = parts.iter().filter(|p| p.ok).map(|p| p.detail.as_str()).collect();
+        if target != Dim::None || prev != Dim::None || !done.is_empty() {
+            let (kind, title) = match target {
+                Dim::None => ("dim-off", "Яркость мониторов возвращена"),
+                Dim::Secondary => ("dim-on", "Мониторы затемнены, кроме основного"),
+                Dim::All => ("dim-on", "Мониторы затемнены"),
+            };
+            let why = self.dim_reason(target, prev);
+            let tail = if done.is_empty() { String::new() } else { format!(": {}", done.join("; ")) };
+            self.event(ts, kind, format!("{title} ({why}){tail}"), None);
+        }
+        parts.iter().all(|p| p.ok)
+    }
+
+    /// Причина затемнения для истории.
+    fn dim_reason(&self, target: Dim, prev: Dim) -> &'static str {
+        let level = decision::boost::level(&self.state);
+        match target {
+            Dim::Secondary => "запущена игра: основной монитор не затемнён",
+            Dim::All if prev == Dim::Secondary => "игра закрыта",
+            Dim::All if level == EcoLevel::Deep => "включён Максимальный Eco",
+            Dim::All => "включён Сильный Eco",
+            Dim::None if level >= EcoLevel::Strong => "«Гасить мониторы» выключено",
+            Dim::None => "Сильный и Максимальный Eco сняты",
+        }
     }
 
     fn fail(&mut self, ts: Ts, text: String) {
@@ -635,6 +730,9 @@ impl<R: StationReader, C: Clock, B: PowerBackend> Service<R, C, B> {
             eco_at: iso(v.eco_at),
             eco: v.eco,
             manual: v.manual,
+            boost: BoostView { strong: v.boost.strong, max: v.boost.max, dim: !v.boost.dim_off },
+            // Если затемнение выключено в конфиге, мониторы не трогаются, что бы ни решило ядро.
+            dimmed: if self.cfg.eco.dim { v.dimmed } else { Dim::None },
             charging_mode: self.charging_mode,
             hours_left: estimate.as_ref().map(|e| e.hours),
             runtime_source: estimate.map(|e| e.source),
@@ -690,6 +788,7 @@ mod tests {
 
     use super::*;
     use crate::clock::FakeClock;
+    use crate::power::brightness::Monitor;
 
     /// Показания по очереди (последнее повторяется) и режим зарядки, который меняет запись.
     struct Fake {
@@ -801,6 +900,51 @@ mod tests {
         }
     }
 
+    /// Мониторы в памяти: A — основной, B — второй. Настоящие мониторы в тестах не вызываются.
+    struct Screens {
+        monitors: Vec<Monitor>,
+        /// `(id, яркость)` по порядку записей.
+        writes: Vec<(String, u32)>,
+        lists: u32,
+        fail: Vec<&'static str>,
+        crash: bool,
+    }
+
+    impl Screens {
+        fn cur(&self, id: &str) -> u32 {
+            self.monitors.iter().find(|m| m.id == id).unwrap().cur
+        }
+        fn set_cur(&mut self, id: &str, v: u32) {
+            self.monitors.iter_mut().find(|m| m.id == id).unwrap().cur = v;
+        }
+    }
+
+    struct FakeBrightness(Rc<RefCell<Screens>>);
+    impl Brightness for FakeBrightness {
+        fn monitors(&mut self) -> Result<Vec<Monitor>, String> {
+            let mut s = self.0.borrow_mut();
+            s.lists += 1;
+            Ok(s.monitors.clone())
+        }
+        fn set(&mut self, id: &str, value: u32) -> Result<(), String> {
+            let mut s = self.0.borrow_mut();
+            assert!(!s.crash, "сбой записи");
+            s.writes.push((id.to_string(), value));
+            if s.fail.contains(&id) {
+                return Err("монитор не ответил".into());
+            }
+            s.set_cur(id, value);
+            Ok(())
+        }
+    }
+
+    struct FakeGames(Rc<std::cell::Cell<bool>>);
+    impl Games for FakeGames {
+        fn running(&mut self) -> bool {
+            self.0.get()
+        }
+    }
+
     struct FakeHib(Rc<RefCell<u32>>);
     impl Hibernator for FakeHib {
         fn available(&self) -> bool {
@@ -825,6 +969,9 @@ mod tests {
         notes: Rc<RefCell<Vec<String>>>,
         outages: mpsc::UnboundedReceiver<crate::dtek::FinishedOutage>,
         shutdown: mpsc::UnboundedSender<ShutdownRequest>,
+        boost_tx: mpsc::UnboundedSender<BoostRequest>,
+        screens: Rc<RefCell<Screens>>,
+        game: Rc<std::cell::Cell<bool>>,
     }
 
     fn harness(reads: Vec<Result<ReadOutcome, MissReason>>) -> Harness {
@@ -832,6 +979,7 @@ mod tests {
         let (health, _) = watch::channel(HealthView::default());
         let (events, _) = broadcast::channel(16);
         let (_tx, modes) = mpsc::unbounded_channel();
+        let (boost_tx, boosts) = mpsc::unbounded_channel();
         let (_check_tx, checks) = mpsc::unbounded_channel();
         let (_charging_tx, charging) = mpsc::unbounded_channel();
         let (shutdown_tx, shutdown) = mpsc::unbounded_channel();
@@ -851,6 +999,17 @@ mod tests {
         let power = PowerControl::new(backend, cfg.eco.clone(), None, false);
         let hibernations = Rc::new(RefCell::new(0));
         let notes = Rc::new(RefCell::new(Vec::new()));
+        let screens = Rc::new(RefCell::new(Screens {
+            monitors: vec![
+                Monitor { id: "A".into(), primary: true, min: 0, cur: 100, max: 100 },
+                Monitor { id: "B".into(), primary: false, min: 0, cur: 70, max: 100 },
+            ],
+            writes: Vec::new(),
+            lists: 0,
+            fail: Vec::new(),
+            crash: false,
+        }));
+        let game = Rc::new(std::cell::Cell::new(false));
         let svc = Service::new(
             cfg,
             Store::in_memory().unwrap(),
@@ -859,10 +1018,31 @@ mod tests {
             power,
             Box::new(FakeHib(hibernations.clone())),
             Box::new(FakeNotify(notes.clone())),
+            Box::new(FakeBrightness(screens.clone())),
+            Box::new(FakeGames(game.clone())),
             PathBuf::from("Z:/nonexistent/no-hibernate"),
-            Channels { now, health, events, modes, checks, charging, shutdown, outages: Some(outages_tx) },
+            Channels {
+                now,
+                health,
+                events,
+                modes,
+                boosts,
+                checks,
+                charging,
+                shutdown,
+                outages: Some(outages_tx),
+            },
         );
-        Harness { svc, hibernations, notes, outages: outages_rx, shutdown: shutdown_tx }
+        Harness {
+            svc,
+            hibernations,
+            notes,
+            outages: outages_rx,
+            shutdown: shutdown_tx,
+            boost_tx,
+            screens,
+            game,
+        }
     }
 
     #[tokio::test]
@@ -1071,9 +1251,42 @@ mod tests {
         assert!(ticks(&mut h, 18).await > 0);
         assert!(h.svc.auto.want.is_some());
         h.svc.reader.write_err = None;
-        let (r, _rx) = charging_request(ChargingMode::Silent);
+        let (r, _rx) = charging_request(ChargingMode::Standard);
         h.svc.cycle(None, vec![], vec![r]).await;
         assert_eq!(h.svc.auto.want, None);
+        assert_eq!(h.svc.reader.charging, Some(ChargingMode::Standard), "«Турбо» по правилу не повторяется");
+    }
+
+    #[tokio::test]
+    async fn manual_silent_below_ninety_on_mains_is_replaced_with_standard() {
+        let mut h = harness(vec![ok(60, 300); 6]);
+        h.svc.cfg.charging_auto.enabled = true;
+        h.svc.start();
+        assert_eq!(ticks(&mut h, 4).await, 0, "сеть подтверждена, «Стандартная» не трогается");
+        let (r, mut rx) = charging_request(ChargingMode::Silent);
+        h.svc.cycle(None, vec![], vec![r]).await;
+        let v = rx.try_recv().unwrap();
+        assert!(
+            !v.ok && v.text.contains("Автоматика вернула режим") && v.text.contains("ниже 90 %"),
+            "{v:?}"
+        );
+        assert_eq!(v.charging_mode, Some(ChargingMode::Standard));
+        assert_eq!(h.svc.reader.writes, 2, "нажатие записано, затем правило");
+        assert_eq!(
+            h.svc.reader.charging,
+            Some(ChargingMode::Standard),
+            "принятое показание вернуло «Стандартную»"
+        );
+        let texts = event_texts(&h, "charging-mode");
+        assert!(texts.iter().any(|t| t.contains("заряд 60 % ниже 90 %")), "{texts:?}");
+
+        // Автоматика выключена: «Тихая» владельца держится.
+        let mut h = harness(vec![ok(60, 300); 6]);
+        h.svc.start();
+        let _ = ticks(&mut h, 4).await;
+        let (r, _rx) = charging_request(ChargingMode::Silent);
+        h.svc.cycle(None, vec![], vec![r]).await;
+        let _ = ticks(&mut h, 1).await;
         assert_eq!(h.svc.reader.charging, Some(ChargingMode::Silent));
     }
 
@@ -1139,6 +1352,347 @@ mod tests {
         }
         assert!(wait.try_recv().is_ok(), "зависшее чтение задержало ответ");
         assert_eq!(h.svc.reader.charging, Some(ChargingMode::Silent));
+    }
+
+    fn press(h: &Harness, r: BoostRequest) {
+        h.boost_tx.send(r).unwrap();
+    }
+
+    fn kinds(h: &Harness) -> Vec<String> {
+        h.svc.store.recent_events(100).unwrap().into_iter().map(|e| e.kind).collect()
+    }
+
+    fn eco_on(h: &Harness) -> bool {
+        h.svc.power.backend().active != crate::power::HIGH_PERFORMANCE
+    }
+
+    #[tokio::test]
+    async fn strong_press_applies_the_level_and_leaves_the_selection_alone() {
+        let mut h = harness(vec![ok(80, 300)]);
+        h.svc.start();
+        let _ = h.svc.tick(None).await;
+        assert!(!eco_on(&h));
+        press(&h, BoostRequest::Strong(true));
+        let _ = h.svc.tick(None).await;
+        assert!(eco_on(&h), "сильный уровень применён к ПК");
+        assert_eq!(h.svc.state.manual, ManualMode::Auto, "выбор режима не менялся");
+        assert_eq!(h.svc.state.eco, EcoLevel::Strong);
+        assert_eq!(h.screens.borrow().cur("A"), 0);
+        assert_eq!(h.screens.borrow().cur("B"), 0);
+        let v = h.svc.now_view(h.svc.clock.now());
+        assert_eq!(v.eco, EcoLevel::Strong);
+        assert_eq!(
+            (v.boost.strong.on, v.boost.strong.auto, v.boost.max.on, v.boost.dim),
+            (true, false, false, true)
+        );
+        assert_eq!((v.dimmed, v.manual), (Dim::All, ManualMode::Auto));
+        let saved = h.svc.store.get_meta::<DimRestore>("dim_restore").unwrap();
+        assert_eq!((saved.monitors["A"], saved.monitors["B"]), (100, 70));
+        let k = kinds(&h);
+        for want in ["boost-manual", "eco-strong", "dim-on"] {
+            assert!(k.contains(&want.to_string()), "{want} в {k:?}");
+        }
+        assert!(event_texts(&h, "eco-strong")[0].contains("Сильный Eco включён"));
+        assert!(
+            event_texts(&h, "dim-on")[0].contains("включён Сильный Eco"),
+            "{:?}",
+            event_texts(&h, "dim-on")
+        );
+
+        // Выключение возвращает прежнюю яркость и обычный режим.
+        h.svc.clock.advance(MIN);
+        press(&h, BoostRequest::Strong(false));
+        let _ = h.svc.tick(None).await;
+        assert!(!eco_on(&h));
+        assert_eq!((h.screens.borrow().cur("A"), h.screens.borrow().cur("B")), (100, 70));
+        assert!(
+            h.svc.store.get_meta::<DimRestore>("dim_restore").is_none(),
+            "после возврата сохранённого нет"
+        );
+        assert!(kinds(&h).contains(&"dim-off".to_string()));
+        assert_eq!(h.svc.now_view(h.svc.clock.now()).dimmed, Dim::None);
+    }
+
+    #[tokio::test]
+    async fn several_presses_in_one_cycle_are_applied_in_order() {
+        let mut h = harness(vec![ok(80, 300)]);
+        h.svc.start();
+        press(&h, BoostRequest::Strong(true));
+        press(&h, BoostRequest::Max(true));
+        press(&h, BoostRequest::Strong(false));
+        let _ = h.svc.tick(None).await;
+        assert_eq!(h.svc.state.eco, EcoLevel::Deep, "остался только максимальный");
+        assert!(h.svc.state.boost.max.on && !h.svc.state.boost.strong.on);
+        assert!(event_texts(&h, "eco-deep")[0].contains("Максимальный Eco включён"));
+    }
+
+    #[tokio::test]
+    async fn dim_switch_returns_brightness_while_the_level_stays() {
+        let mut h = harness(vec![ok(80, 300)]);
+        h.svc.start();
+        press(&h, BoostRequest::Max(true));
+        let _ = h.svc.tick(None).await;
+        assert_eq!(h.screens.borrow().cur("B"), 0);
+        h.svc.clock.advance(MIN);
+        press(&h, BoostRequest::Dim(false));
+        let _ = h.svc.tick(None).await;
+        assert_eq!((h.screens.borrow().cur("A"), h.screens.borrow().cur("B")), (100, 70));
+        assert_eq!(h.svc.state.eco, EcoLevel::Deep, "уровень остаётся");
+        assert!(!h.svc.now_view(h.svc.clock.now()).boost.dim);
+        assert!(event_texts(&h, "dim-off")[0].contains("«Гасить мониторы» выключено"));
+        h.svc.clock.advance(MIN);
+        press(&h, BoostRequest::Dim(true));
+        let _ = h.svc.tick(None).await;
+        assert_eq!((h.screens.borrow().cur("A"), h.screens.borrow().cur("B")), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn level_switched_on_during_a_game_never_writes_to_the_primary() {
+        let mut h = harness(vec![ok(80, 300)]);
+        h.game.set(true);
+        h.svc.start();
+        press(&h, BoostRequest::Strong(true));
+        let _ = h.svc.tick(None).await;
+        let s = h.screens.borrow();
+        assert!(
+            s.writes.iter().all(|(id, _)| id != "A"),
+            "основной не получил ни одной записи: {:?}",
+            s.writes
+        );
+        assert_eq!((s.cur("A"), s.cur("B")), (100, 0));
+        drop(s);
+        assert_eq!(h.svc.now_view(h.svc.clock.now()).dimmed, Dim::Secondary);
+        assert!(event_texts(&h, "dim-on")[0].contains("запущена игра: основной монитор не затемнён"));
+    }
+
+    #[tokio::test]
+    async fn game_start_and_stop_between_cycles_move_only_the_primary() {
+        let mut h = harness(vec![ok(80, 300)]);
+        h.svc.start();
+        press(&h, BoostRequest::Strong(true));
+        let _ = h.svc.tick(None).await;
+        assert_eq!((h.screens.borrow().cur("A"), h.screens.borrow().cur("B")), (0, 0));
+        h.screens.borrow_mut().writes.clear();
+
+        h.game.set(true);
+        h.svc.clock.advance(MIN);
+        let _ = h.svc.tick(None).await;
+        assert_eq!(
+            h.screens.borrow().writes,
+            [("A".to_string(), 100)],
+            "основному вернулась яркость, второй не тронут"
+        );
+        assert_eq!(h.svc.now_view(h.svc.clock.now()).dimmed, Dim::Secondary);
+        // Игра идёт: повторных записей нет.
+        h.svc.clock.advance(MIN);
+        let _ = h.svc.tick(None).await;
+        assert_eq!(h.screens.borrow().writes.len(), 1);
+
+        h.game.set(false);
+        h.svc.clock.advance(MIN);
+        let _ = h.svc.tick(None).await;
+        assert_eq!(h.screens.borrow().writes.last(), Some(&("A".to_string(), 0)));
+        assert_eq!(h.screens.borrow().writes.len(), 2);
+        assert!(
+            event_texts(&h, "dim-on").iter().any(|t| t.contains("игра закрыта")),
+            "{:?}",
+            event_texts(&h, "dim-on")
+        );
+
+        // Уровень снят во время игры: второй возвращается, основной не трогается.
+        h.game.set(true);
+        h.svc.clock.advance(MIN);
+        let _ = h.svc.tick(None).await;
+        h.screens.borrow_mut().writes.clear();
+        press(&h, BoostRequest::Strong(false));
+        h.svc.clock.advance(MIN);
+        let _ = h.svc.tick(None).await;
+        assert_eq!(h.screens.borrow().writes, [("B".to_string(), 70)]);
+        assert_eq!(h.screens.borrow().cur("A"), 100);
+    }
+
+    #[tokio::test]
+    async fn disabled_game_detection_dims_every_monitor() {
+        let mut h = harness(vec![ok(80, 300)]);
+        h.svc.cfg.eco.dim_skip_games = false;
+        h.game.set(true);
+        h.svc.start();
+        press(&h, BoostRequest::Strong(true));
+        let _ = h.svc.tick(None).await;
+        assert_eq!((h.screens.borrow().cur("A"), h.screens.borrow().cur("B")), (0, 0));
+        assert_eq!(h.svc.now_view(h.svc.clock.now()).dimmed, Dim::All);
+    }
+
+    #[tokio::test]
+    async fn restore_is_saved_before_the_first_write() {
+        let mut h = harness(vec![ok(80, 300)]);
+        h.svc.start();
+        h.screens.borrow_mut().crash = true;
+        let svc = &mut h.svc;
+        let ts = svc.clock.now();
+        // Запись «падает» (как сбой процесса посреди затемнения): сохранённые значения уже в базе.
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| svc.set_dim(ts, Dim::All)));
+        assert!(r.is_err());
+        let saved = h.svc.store.get_meta::<DimRestore>("dim_restore").expect("сохранено до записи");
+        assert_eq!((saved.monitors["A"], saved.monitors["B"]), (100, 70));
+        assert!(h.screens.borrow().writes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dim_disabled_in_config_touches_no_monitor() {
+        let mut h = harness(vec![ok(80, 300)]);
+        h.svc.cfg.eco.dim = false;
+        h.svc.start();
+        press(&h, BoostRequest::Strong(true));
+        let _ = h.svc.tick(None).await;
+        assert!(eco_on(&h), "уровень применяется без затемнения");
+        let s = h.screens.borrow();
+        assert_eq!((s.lists, s.writes.len()), (0, 0), "мониторы даже не опрашивались");
+        drop(s);
+        assert!(h.svc.store.get_meta::<DimRestore>("dim_restore").is_none());
+        assert_eq!(h.svc.now_view(h.svc.clock.now()).dimmed, Dim::None);
+        assert!(!kinds(&h).contains(&"dim-on".to_string()));
+    }
+
+    #[tokio::test]
+    async fn dim_pct_from_config_is_written() {
+        let mut h = harness(vec![ok(80, 300)]);
+        h.svc.cfg.eco.dim_pct = 30;
+        h.svc.start();
+        press(&h, BoostRequest::Max(true));
+        let _ = h.svc.tick(None).await;
+        assert_eq!((h.screens.borrow().cur("A"), h.screens.borrow().cur("B")), (30, 30));
+    }
+
+    #[tokio::test]
+    async fn brightness_is_restored_at_start_when_dimming_is_no_longer_wanted() {
+        let mut h = harness(vec![ok(80, 300)]);
+        // Прошлый процесс затемнил мониторы и упал; состояние решения уже без затемнения.
+        h.screens.borrow_mut().set_cur("A", 0);
+        h.screens.borrow_mut().set_cur("B", 0);
+        let saved = DimRestore {
+            monitors: [("A".to_string(), 100), ("B".to_string(), 70)].into(),
+            ..Default::default()
+        };
+        log_db(h.svc.store.set_meta("dim_restore", &saved));
+        h.svc.start();
+        assert_eq!((h.screens.borrow().cur("A"), h.screens.borrow().cur("B")), (100, 70));
+        assert!(h.svc.store.get_meta::<DimRestore>("dim_restore").is_none());
+        assert!(kinds(&h).contains(&"dim-off".to_string()));
+
+        // Затемнение ещё нужно (состояние говорит «все»): на старте ничего не возвращается.
+        let mut h = harness(vec![ok(80, 300)]);
+        h.screens.borrow_mut().set_cur("A", 0);
+        log_db(h.svc.store.set_meta("dim_restore", &saved));
+        h.svc.state.dim = Dim::All;
+        h.svc.start();
+        assert!(h.screens.borrow().writes.is_empty());
+        assert!(h.svc.store.get_meta::<DimRestore>("dim_restore").is_some());
+    }
+
+    #[tokio::test]
+    async fn failed_dim_write_is_reported_and_retried_on_backoff() {
+        let mut h = harness(vec![ok(80, 300)]);
+        h.screens.borrow_mut().fail = vec!["A"];
+        h.svc.start();
+        press(&h, BoostRequest::Strong(true));
+        let _ = h.svc.tick(None).await;
+        assert_eq!(h.screens.borrow().cur("B"), 0, "второй монитор затемнён несмотря на отказ первого");
+        assert_eq!(h.svc.state.dim_applied, Dim::None, "затемнение не засчитано");
+        assert!(kinds(&h).contains(&"eco-part-failed".to_string()));
+        let writes = h.screens.borrow().writes.len();
+        // До паузы повтора нет.
+        h.svc.clock.advance(30 * SEC);
+        let _ = h.svc.tick(None).await;
+        assert_eq!(h.screens.borrow().writes.len(), writes);
+        // После паузы — повтор; отказ прошёл.
+        h.screens.borrow_mut().fail.clear();
+        h.svc.clock.advance(MIN);
+        let _ = h.svc.tick(None).await;
+        assert_eq!(h.svc.state.dim_applied, Dim::All);
+        assert_eq!(h.screens.borrow().cur("A"), 0);
+        let saved = h.svc.store.get_meta::<DimRestore>("dim_restore").unwrap();
+        assert_eq!(
+            (saved.monitors["A"], saved.monitors["B"]),
+            (100, 70),
+            "прежние значения не перезаписаны нулём"
+        );
+    }
+
+    #[tokio::test]
+    async fn dry_run_dims_nothing_and_saves_nothing() {
+        let mut h = harness(vec![ok(80, 300)]);
+        h.svc.cfg.dry_run = true;
+        h.svc.start();
+        press(&h, BoostRequest::Strong(true));
+        let _ = h.svc.tick(None).await;
+        assert!(h.screens.borrow().writes.is_empty());
+        assert!(h.svc.store.get_meta::<DimRestore>("dim_restore").is_none());
+        assert!(event_texts(&h, "dim-on")[0].contains("dry run"), "{:?}", event_texts(&h, "dim-on"));
+    }
+
+    #[tokio::test]
+    async fn outage_at_the_strong_threshold_dims_and_mains_back_restores_everything() {
+        let mut reads = vec![ok(50, 300), ok(50, 300)];
+        reads.extend((0..8).map(|_| ok(50, 0)));
+        reads.extend((0..8).map(|_| ok(50, 300)));
+        let mut h = harness(reads);
+        h.svc.start();
+        let mut dimmed = false;
+        for _ in 0..18 {
+            let _ = h.svc.tick(None).await;
+            h.svc.clock.advance(MIN);
+            if h.screens.borrow().cur("A") == 0 {
+                dimmed = true;
+                assert_eq!(h.svc.state.eco, EcoLevel::Strong);
+                assert!(h.svc.state.boost.strong.auto);
+            }
+        }
+        assert!(dimmed, "мониторы так и не затемнились");
+        assert_eq!((h.screens.borrow().cur("A"), h.screens.borrow().cur("B")), (100, 70));
+        assert_eq!(h.svc.state.eco, EcoLevel::None);
+        assert!(!h.svc.state.boost.strong.on);
+        assert!(h.svc.store.get_meta::<DimRestore>("dim_restore").is_none());
+        assert!(h.svc.store.get_meta::<PowerRestore>("power_restore").is_none());
+        let k = kinds(&h);
+        for want in ["level-strong", "eco-strong", "dim-on", "boost-off", "dim-off", "eco-off"] {
+            assert!(k.contains(&want.to_string()), "{want} в {k:?}");
+        }
+        assert!(event_texts(&h, "dim-off")[0].contains("Сильный и Максимальный Eco сняты"));
+        assert!(
+            h.notes.borrow().is_empty(),
+            "у сильного уровня нет уведомления Windows: {:?}",
+            h.notes.borrow()
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_reading_changes_no_brightness() {
+        // Скачок 80 → 20 за минуту отвергается проверкой правдоподобия.
+        let mut h = harness(vec![ok(80, 0), ok(80, 0), ok(20, 0)]);
+        h.svc.start();
+        for _ in 0..3 {
+            let _ = h.svc.tick(None).await;
+            h.svc.clock.advance(MIN);
+        }
+        let s = h.screens.borrow();
+        assert_eq!((s.lists, s.writes.len()), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn boost_requests_wake_the_loop_like_a_mode_press() {
+        let mut h = harness(vec![ok(80, 300)]);
+        let tx = h.boost_tx.clone();
+        tokio::select! {
+            () = h.svc.run() => unreachable!(),
+            () = async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                tx.send(BoostRequest::Strong(true)).unwrap();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            } => {}
+        }
+        assert!(h.svc.state.boost.strong.on, "нажатие дошло до решения, не дожидаясь шага опроса");
+        assert_eq!(h.svc.state.manual, ManualMode::Auto);
     }
 
     #[tokio::test]

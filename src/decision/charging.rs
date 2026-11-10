@@ -16,9 +16,18 @@ pub const SHUTDOWN_PAUSE: Ts = 2 * MIN;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Why {
-    Light { soc: u8 },
-    Soc { soc: u8 },
+    Light {
+        soc: u8,
+    },
+    Soc {
+        soc: u8,
+    },
     Shutdown,
+    /// Сеть есть, заряд ниже порога «Тихой», а стоит «Тихая» (feature 006).
+    Floor {
+        soc: u8,
+        below: u8,
+    },
 }
 
 impl Why {
@@ -27,6 +36,7 @@ impl Why {
             Self::Light { .. } => "light",
             Self::Soc { .. } => "soc",
             Self::Shutdown => "shutdown",
+            Self::Floor { .. } => "floor",
         }
     }
 
@@ -35,6 +45,9 @@ impl Why {
             Self::Light { soc } => format!("свет включился, заряд {soc} %"),
             Self::Soc { soc } => format!("заряд {soc} %"),
             Self::Shutdown => "выключение ПК".into(),
+            Self::Floor { soc, below } => {
+                format!("свет есть, заряд {soc} % ниже {below} %: «Тихая» заменена")
+            }
         }
     }
 }
@@ -92,6 +105,12 @@ fn by_crossing(from: u8, to: u8, cfg: &config::ChargingAuto) -> Option<ChargingM
     }
 }
 
+/// Ниже этого заряда «Тихая» при сети не держится: меньший из двух порогов «Тихой», чтобы не спорить с правилами,
+/// которые её ставят.
+fn silent_floor(cfg: &config::ChargingAuto) -> u8 {
+    cfg.light_silent_at.min(cfg.silent_at)
+}
+
 fn set_want(a: &mut ChargingAuto, want: Option<Want>) {
     a.want = want;
     a.backoff = None;
@@ -129,6 +148,20 @@ pub fn update(
             set_want(a, Some(Want { mode, why: Why::Soc { soc: seen.soc } }));
         }
         a.high_water = Some(a.high_water.map_or(seen.soc, |h| h.max(seen.soc)));
+    }
+    // «Тихая» при подтверждённой сети ниже порога не держится, откуда бы она ни взялась (feature 006). Проверка на
+    // каждом принятом показании; порог «Тихой» после этого считается не пройденным.
+    let below = silent_floor(cfg);
+    if a.want.is_none()
+        && !a.light_pending
+        && on
+        && seen.mains_confirmed
+        && current == Some(ChargingMode::Silent)
+        && seen.soc < below
+    {
+        a.high_water = Some(seen.soc);
+        let why = Why::Floor { soc: seen.soc, below };
+        set_want(a, Some(Want { mode: ChargingMode::Standard, why }));
     }
     let want = a.want?;
     if current == Some(want.mode) {
@@ -201,9 +234,10 @@ mod tests {
             (30, Standard),
             (31, Standard),
             (74, Standard),
-            (75, Silent),
-            (79, Silent),
-            (80, Silent),
+            (75, Standard),
+            (80, Standard),
+            (89, Standard),
+            (90, Silent),
             (100, Silent),
         ] {
             let mut a = after_outage();
@@ -217,10 +251,9 @@ mod tests {
     #[test]
     fn near_full_light_keeps_silent_without_a_write() {
         let mut a = after_outage();
-        assert_eq!(update(&mut a, on(77), Some(Silent), MIN, &cfg()), None);
+        assert_eq!(update(&mut a, on(92), Some(Silent), MIN, &cfg()), None);
         assert_eq!(a.want, None);
-        // И порог 80 % ничего не пишет: режим уже стоит.
-        assert_eq!(update(&mut a, on(80), Some(Silent), 2 * MIN, &cfg()), None);
+        assert_eq!(update(&mut a, on(95), Some(Silent), 2 * MIN, &cfg()), None);
     }
 
     #[test]
@@ -228,8 +261,9 @@ mod tests {
         let mut a = after_outage();
         assert_eq!(mode(update(&mut a, on(70), Some(Silent), MIN, &cfg())), Some(Standard));
         report(&mut a, true, MIN);
-        assert_eq!(update(&mut a, on(77), Some(Standard), 2 * MIN, &cfg()), None);
-        assert_eq!(mode(update(&mut a, on(80), Some(Standard), 3 * MIN, &cfg())), Some(Silent));
+        assert_eq!(update(&mut a, on(80), Some(Standard), 2 * MIN, &cfg()), None, "80 % больше не порог");
+        assert_eq!(update(&mut a, on(89), Some(Standard), 3 * MIN, &cfg()), None);
+        assert_eq!(mode(update(&mut a, on(90), Some(Standard), 4 * MIN, &cfg())), Some(Silent));
     }
 
     #[test]
@@ -246,10 +280,14 @@ mod tests {
     #[test]
     fn mains_blink_without_outage_is_not_light() {
         let mut a = ChargingAuto::default();
-        assert_eq!(update(&mut a, on(15), Some(Silent), 0, &cfg()), None);
+        assert_eq!(update(&mut a, on(15), Some(Standard), 0, &cfg()), None);
         let blink = Seen { mains: Mains::Off, mains_confirmed: false, ..on(15) };
-        assert_eq!(update(&mut a, blink, Some(Silent), MIN, &cfg()), None);
-        assert_eq!(update(&mut a, on(15), Some(Silent), 2 * MIN, &cfg()), None);
+        assert_eq!(update(&mut a, blink, Some(Standard), MIN, &cfg()), None);
+        assert_eq!(
+            update(&mut a, on(15), Some(Standard), 2 * MIN, &cfg()),
+            None,
+            "«Турбо» ставит только включение света"
+        );
     }
 
     #[test]
@@ -268,29 +306,29 @@ mod tests {
         let mut a = after_outage();
         let mut current = Silent;
         let mut seen = Vec::new();
-        for (i, soc) in (15..=85).enumerate() {
+        for (i, soc) in (15..=95).enumerate() {
             if let Some(w) = update(&mut a, on(soc), Some(current), i as Ts * MIN, &cfg()) {
                 seen.push((soc, w.mode));
                 current = w.mode;
                 report(&mut a, true, i as Ts * MIN);
             }
         }
-        assert_eq!(seen, [(15, Turbo), (50, Standard), (80, Silent)]);
+        assert_eq!(seen, [(15, Turbo), (50, Standard), (90, Silent)]);
     }
 
     #[test]
     fn threshold_fires_once_when_charge_wobbles() {
         let mut a = ChargingAuto::default();
-        let mut current = Standard;
+        let mut current = Turbo;
         let mut writes = 0;
-        for (i, soc) in [79, 80, 79, 80, 79, 81].into_iter().enumerate() {
+        for (i, soc) in [49, 50, 49, 50, 49, 51].into_iter().enumerate() {
             if let Some(w) = update(&mut a, on(soc), Some(current), i as Ts * MIN, &cfg()) {
                 writes += 1;
                 current = w.mode;
                 report(&mut a, true, i as Ts * MIN);
             }
         }
-        assert_eq!((writes, current), (1, Silent));
+        assert_eq!((writes, current), (1, Standard));
     }
 
     #[test]
@@ -304,9 +342,9 @@ mod tests {
     #[test]
     fn no_threshold_without_mains() {
         let mut a = ChargingAuto::default();
-        assert_eq!(update(&mut a, on(40), Some(Silent), 0, &cfg()), None);
+        assert_eq!(update(&mut a, on(40), Some(Turbo), 0, &cfg()), None);
         let blink = Seen { mains: Mains::Off, mains_confirmed: false, ..on(50) };
-        assert_eq!(update(&mut a, blink, Some(Silent), MIN, &cfg()), None);
+        assert_eq!(update(&mut a, blink, Some(Turbo), MIN, &cfg()), None);
         assert_eq!(a.high_water, Some(40));
     }
 
@@ -314,7 +352,7 @@ mod tests {
     fn jump_over_both_thresholds_takes_the_higher() {
         let mut a = ChargingAuto::default();
         assert_eq!(update(&mut a, on(40), Some(Turbo), 0, &cfg()), None);
-        assert_eq!(mode(update(&mut a, on(85), Some(Turbo), MIN, &cfg())), Some(Silent));
+        assert_eq!(mode(update(&mut a, on(95), Some(Turbo), MIN, &cfg())), Some(Silent));
     }
 
     #[test]
@@ -341,7 +379,7 @@ mod tests {
         assert_eq!(update(&mut a, on(15), Some(Silent), 2 * MIN, &cfg()), None);
         assert_eq!(mode(update(&mut a, on(15), Some(Silent), 3 * MIN, &cfg())), Some(Turbo));
         report(&mut a, true, 3 * MIN);
-        assert_eq!(update(&mut a, on(15), Some(Silent), 4 * MIN, &cfg()), None);
+        assert_eq!(update(&mut a, on(15), Some(Turbo), 4 * MIN, &cfg()), None);
     }
 
     #[test]
@@ -350,7 +388,7 @@ mod tests {
         assert!(update(&mut a, on(15), Some(Silent), 0, &cfg()).is_some());
         report(&mut a, false, 0);
         manual(&mut a);
-        assert_eq!(update(&mut a, on(15), Some(Silent), 10 * MIN, &cfg()), None);
+        assert_eq!(update(&mut a, on(15), Some(Standard), 10 * MIN, &cfg()), None);
 
         let mut a = after_outage();
         assert!(update(&mut a, on(15), Some(Silent), 0, &cfg()).is_some());
@@ -378,6 +416,91 @@ mod tests {
         let mut a = ChargingAuto::default();
         shutdown(&mut a, 10 * MIN);
         assert_eq!(mode(update(&mut a, on(40), Some(Silent), 5 * MIN, &cfg())), Some(Standard));
+    }
+
+    fn floor(soc: u8) -> Option<Want> {
+        Some(Want { mode: Standard, why: Why::Floor { soc, below: 90 } })
+    }
+
+    #[test]
+    fn silent_below_ninety_on_confirmed_mains_becomes_standard() {
+        for soc in [0, 15, 60, 89] {
+            let mut a = ChargingAuto::default();
+            assert_eq!(update(&mut a, on(soc), Some(Silent), 0, &cfg()), floor(soc), "заряд {soc}");
+        }
+        for soc in [90, 91, 100] {
+            let mut a = ChargingAuto::default();
+            assert_eq!(update(&mut a, on(soc), Some(Silent), 0, &cfg()), None, "заряд {soc}");
+        }
+        assert_eq!(Why::Floor { soc: 60, below: 90 }.code(), "floor");
+        assert!(Why::Floor { soc: 60, below: 90 }.text().contains("60 % ниже 90 %"));
+    }
+
+    #[test]
+    fn floor_touches_only_silent_and_only_confirmed_mains() {
+        for current in [Some(Turbo), Some(Standard), None] {
+            let mut a = ChargingAuto::default();
+            assert_eq!(update(&mut a, on(60), current, 0, &cfg()), None, "{current:?}");
+        }
+        let unconfirmed = Seen { mains_confirmed: false, ..on(60) };
+        let no_mains = Seen { mains: Mains::Off, mains_confirmed: false, ..on(60) };
+        for seen in [unconfirmed, no_mains, off(60)] {
+            let mut a = ChargingAuto::default();
+            assert_eq!(update(&mut a, seen, Some(Silent), 0, &cfg()), None, "{seen:?}");
+        }
+    }
+
+    #[test]
+    fn floor_overrides_a_manual_silent_on_the_next_reading() {
+        let mut a = ChargingAuto::default();
+        assert_eq!(update(&mut a, on(60), Some(Standard), 0, &cfg()), None);
+        manual(&mut a);
+        assert_eq!(update(&mut a, on(60), Some(Silent), MIN, &cfg()), floor(60));
+        report(&mut a, true, MIN);
+        assert_eq!(update(&mut a, on(61), Some(Standard), 2 * MIN, &cfg()), None);
+    }
+
+    #[test]
+    fn floor_rearms_the_silent_threshold() {
+        let mut a = ChargingAuto::default();
+        let mut current = Standard;
+        let mut seen = Vec::new();
+        for (i, soc) in [88, 90, 89, 90].into_iter().enumerate() {
+            if let Some(w) = update(&mut a, on(soc), Some(current), i as Ts * MIN, &cfg()) {
+                seen.push((soc, w.mode));
+                current = w.mode;
+                report(&mut a, true, i as Ts * MIN);
+            }
+        }
+        assert_eq!(seen, [(90, Silent), (89, Standard), (90, Silent)]);
+    }
+
+    #[test]
+    fn floor_waits_out_the_shutdown_pause_and_retries_by_backoff() {
+        let mut a = ChargingAuto::default();
+        shutdown(&mut a, 0);
+        assert_eq!(update(&mut a, on(60), Some(Silent), MIN, &cfg()), None, "пауза после выключения");
+
+        let mut a = ChargingAuto::default();
+        assert_eq!(update(&mut a, on(60), Some(Silent), 0, &cfg()), floor(60));
+        report(&mut a, false, 0);
+        assert_eq!(update(&mut a, on(61), Some(Silent), MIN - 1, &cfg()), None);
+        assert_eq!(update(&mut a, on(61), Some(Silent), MIN, &cfg()), floor(60), "повтор той же цели");
+        report(&mut a, true, MIN);
+        assert_eq!(update(&mut a, on(61), Some(Standard), 2 * MIN, &cfg()), None);
+    }
+
+    #[test]
+    fn floor_uses_the_lower_of_the_two_silent_thresholds() {
+        let c = config::ChargingAuto { light_silent_at: 75, silent_at: 80, ..cfg() };
+        let mut a = ChargingAuto::default();
+        assert_eq!(
+            update(&mut a, on(76), Some(Silent), 0, &c),
+            None,
+            "правило включения света ставит «Тихую» с 75"
+        );
+        let w = update(&mut a, on(74), Some(Silent), MIN, &c);
+        assert_eq!(w, Some(Want { mode: Standard, why: Why::Floor { soc: 74, below: 75 } }));
     }
 
     #[test]

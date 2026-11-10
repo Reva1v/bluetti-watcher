@@ -12,6 +12,7 @@ pub fn level_word(level: EcoLevel) -> &'static str {
     match level {
         EcoLevel::None => "normal",
         EcoLevel::Eco => "eco",
+        EcoLevel::Strong => "strong",
         EcoLevel::Deep => "deep",
     }
 }
@@ -20,18 +21,20 @@ pub fn parse_level(s: &str) -> Option<EcoLevel> {
     match s.trim() {
         "normal" => Some(EcoLevel::None),
         "eco" => Some(EcoLevel::Eco),
+        "strong" => Some(EcoLevel::Strong),
         "deep" => Some(EcoLevel::Deep),
         _ => None,
     }
 }
 
 /// Лимит для уровня (единицы — как у `default`/`min`): normal → default; eco → max(min, default × gpu_pct %);
-/// deep → min при `deep_gpu_pct = 0`, иначе max(min, default × pct %); всегда в `[min, default]`.
+/// strong → max(min, default × strong_gpu_pct %); deep → min при `deep_gpu_pct = 0`, иначе max(min, default × pct %); всегда в `[min, default]`.
 pub fn limit_for(level: EcoLevel, default: u32, min: u32, cfg: &Eco) -> u32 {
     let pct = |p: u8| (default as u64 * p as u64 / 100) as u32;
     let want = match level {
         EcoLevel::None => default,
         EcoLevel::Eco => pct(cfg.gpu_pct).max(min),
+        EcoLevel::Strong => pct(cfg.strong_gpu_pct).max(min),
         EcoLevel::Deep if cfg.deep_gpu_pct == 0 => min,
         EcoLevel::Deep => pct(cfg.deep_gpu_pct).max(min),
     };
@@ -180,6 +183,24 @@ mod tests {
     }
 
     #[test]
+    fn strong_limit_sits_between_eco_and_deep() {
+        let c = Eco { strong_gpu_pct: 50, ..eco(70, 0) };
+        assert_eq!(limit_for(EcoLevel::Strong, 170_000, 60_000, &c), 85_000);
+        assert!(
+            limit_for(EcoLevel::Eco, 170_000, 60_000, &c) > limit_for(EcoLevel::Strong, 170_000, 60_000, &c)
+        );
+        assert!(
+            limit_for(EcoLevel::Strong, 170_000, 60_000, &c) > limit_for(EcoLevel::Deep, 170_000, 60_000, &c)
+        );
+        // Процент ниже минимума карты поднимается до минимума; 0 % — тоже минимум.
+        assert_eq!(limit_for(EcoLevel::Strong, 170, 100, &c), 100);
+        let zero = Eco { strong_gpu_pct: 0, ..c.clone() };
+        assert_eq!(limit_for(EcoLevel::Strong, 170, 100, &zero), 100);
+        let full = Eco { strong_gpu_pct: 100, ..c };
+        assert_eq!(limit_for(EcoLevel::Strong, 170, 100, &full), 170);
+    }
+
+    #[test]
     fn rtx3060_defaults() {
         let c = eco(70, 0);
         assert_eq!(limit_for(EcoLevel::None, 170, 100, &c), 170);
@@ -198,8 +219,8 @@ mod tests {
     #[test]
     fn always_within_min_and_default() {
         for p in [0u8, 1, 50, 99, 100] {
-            for lvl in [EcoLevel::None, EcoLevel::Eco, EcoLevel::Deep] {
-                let w = limit_for(lvl, 170_000, 100_000, &eco(p, p));
+            for lvl in [EcoLevel::None, EcoLevel::Eco, EcoLevel::Strong, EcoLevel::Deep] {
+                let w = limit_for(lvl, 170_000, 100_000, &Eco { strong_gpu_pct: p, ..eco(p, p) });
                 assert!((100_000..=170_000).contains(&w), "{lvl:?} {p}% → {w}");
             }
         }
@@ -209,9 +230,10 @@ mod tests {
 
     #[test]
     fn request_words_roundtrip() {
-        for lvl in [EcoLevel::None, EcoLevel::Eco, EcoLevel::Deep] {
+        for lvl in [EcoLevel::None, EcoLevel::Eco, EcoLevel::Strong, EcoLevel::Deep] {
             assert_eq!(parse_level(&format!("{}\r\n", level_word(lvl))), Some(lvl));
         }
         assert_eq!(parse_level("max"), None);
+        assert_eq!(level_word(EcoLevel::Strong), "strong");
     }
 }

@@ -16,6 +16,8 @@
   const S = {
     now: null, outages: [], events: [], range: '6h', hist: null, histAt: 0, xr: [0, 1], gaps: [],
     pending: null, pendingAt: 0, modeErr: '', conn: true,
+    // Нажатия «Сильный Eco» / «Максимальный Eco» / «Гасить мониторы», ещё не подтверждённые сервисом: ключ → [значение, время].
+    bp: {},
     chargeBusy: null, chargeErr: '',
   };
 
@@ -215,25 +217,29 @@
   function renderMode(n, nowMs) {
     const active = S.pending || n.manual;
     // В «Авто» полупрозрачно подсвечен режим, который сейчас фактически действует.
-    const effective = active === 'auto' || !active ? (n.eco === 'eco' || n.eco === 'deep' ? 'eco' : 'max') : '';
+    const effective = active === 'auto' || !active ? (n.eco !== 'none' ? 'eco' : 'max') : '';
     for (const b of document.querySelectorAll('#mode-seg button')) {
       const on = String(b.dataset.mode === active);
       if (b.getAttribute('aria-pressed') !== on) b.setAttribute('aria-pressed', on);
       b.classList.toggle('effective', b.dataset.mode === effective);
     }
     let title, detail;
-    if (active === 'eco') {
+    const auto = n.boost && ((n.eco === 'deep' && n.boost.max.auto) || (n.eco === 'strong' && n.boost.strong.auto));
+    if (n.eco === 'deep') {
+      title = 'Максимальный Eco включён';
+      detail = auto ? 'Заряд низкий: максимальная экономия до возвращения света.' : 'Включён вручную: снимется вручную или когда вернётся свет.';
+    } else if (n.eco === 'strong') {
+      title = 'Сильный Eco включён';
+      detail = (auto ? 'Включён автоматически по заряду' : 'Включён вручную') + ': процессор и видеокарта ограничены сильнее. На ' + LOW_SOC + ' % включится Максимальный Eco.';
+    } else if (active === 'eco') {
       title = 'Eco выбран вручную';
       detail = 'Держится до следующего изменения сети или до «Авто».';
     } else if (active === 'max') {
       title = 'Максимум: eco снят';
       detail = 'Прежняя схема питания до следующего изменения сети или «Авто». Гибернация на ' + HIBERNATE_SOC + ' % всё равно сработает.';
-    } else if (n.eco === 'deep') {
-      title = 'Глубокий eco включён';
-      detail = 'Заряд низкий: максимальная экономия до возвращения света.';
     } else if (n.eco === 'eco') {
       title = 'Eco включён автоматически';
-      detail = 'Схема «Bluetti Eco»: CPU и GPU ограничены, монитор гаснет раньше. На ' + LOW_SOC + ' % включится глубокий eco.';
+      detail = 'Схема «Bluetti Eco»: CPU и GPU ограничены, монитор гаснет раньше. На ' + LOW_SOC + ' % включится Максимальный Eco.';
     } else if (n.ecoAt) {
       const left = Math.max(0, Math.round((new Date(n.ecoAt) - nowMs) / 1000));
       title = 'Eco через ' + Math.floor(left / 60) + ':' + pad(left % 60);
@@ -245,8 +251,62 @@
     if (n.hibernateDelayedUntil) detail += ' Гибернация отложена до ' + hm(new Date(n.hibernateDelayedUntil)) + '.';
     setText('mode-title', title);
     setText('mode-detail', detail);
+    renderBoost(n);
     show('mode-err', !!S.modeErr);
     setText('mode-err', S.modeErr);
+  }
+
+  // Значение переключателя: нажатие, которое сервис ещё не подтвердил, показывается сразу.
+  function boostValue(n, key) {
+    const p = S.bp[key];
+    if (p) return p[0];
+    const b = n.boost;
+    if (!b) return key === 'dim';
+    return key === 'dim' ? b.dim !== false : !!b[key].on;
+  }
+
+  function renderBoost(n) {
+    for (const b of document.querySelectorAll('#boosts .tog')) {
+      const key = b.dataset.boost;
+      const on = boostValue(n, key);
+      if (b.getAttribute('aria-pressed') !== String(on)) b.setAttribute('aria-pressed', String(on));
+      // Пометка «авто»: уровень включил порог заряда, а не владелец.
+      b.querySelector('.auto-tag').hidden = !(on && !S.bp[key] && n.boost && n.boost[key].auto);
+    }
+    const dim = boostValue(n, 'dim');
+    if ($('dim-sw').getAttribute('aria-checked') !== String(dim)) $('dim-sw').setAttribute('aria-checked', String(dim));
+    // Что сейчас затемнено; `secondary` бывает только при запущенной игре.
+    const level = n.eco === 'strong' || n.eco === 'deep';
+    let line = '';
+    if (n.dimmed === 'secondary') line = 'Игра запущена: основной монитор не затемнён, остальные затемнены.';
+    else if (n.dimmed === 'all') line = 'Мониторы затемнены.';
+    else if (!dim) line = level ? 'Мониторы не затемняются: «Гасить мониторы» выключено.' : '«Гасить мониторы» выключено до конца ближайшего уровня.';
+    else if (level) line = 'Мониторы пока не затемнены.';
+    setText('dim-line', line);
+    show('dim-line', !!line);
+  }
+
+  async function setBoost(key) {
+    const n = S.now;
+    if (!n) return;
+    const value = !boostValue(n, key);
+    S.bp[key] = [value, Date.now()]; S.modeErr = '';
+    render();
+    try {
+      const r = await fetch('/api/boost', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Bluetti-Watcher': '1' },
+        body: JSON.stringify({ [key]: value }),
+      });
+      if (!r.ok) {
+        const t = await r.text().catch(() => '');
+        throw new Error(t || 'HTTP ' + r.status);
+      }
+    } catch (e) {
+      delete S.bp[key];
+      S.modeErr = 'Не удалось переключить: ' + (e instanceof TypeError ? 'нет связи с сервисом' : e.message);
+      render();
+    }
   }
 
   async function setMode(mode) {
@@ -361,7 +421,7 @@
 
   function evClass(k) {
     if (/failed|refused|critical/.test(k)) return 'ev-bad';
-    if (/^(outage-start|eco-on|eco-deep|level-low|hibernate|dtek-warn)/.test(k)) return 'ev-warn';
+    if (/^(outage-start|eco-on|eco-strong|eco-deep|level-strong|level-low|hibernate|dtek-warn)/.test(k)) return 'ev-warn';
     return '';
   }
 
@@ -733,6 +793,10 @@
   function setNow(v) {
     S.now = v;
     if (S.pending && (v.manual === S.pending || Date.now() - S.pendingAt > 120e3)) S.pending = null;
+    for (const [key, [value, at]] of Object.entries(S.bp)) {
+      const now = key === 'dim' ? v.boost.dim : v.boost[key].on;
+      if (now === value || Date.now() - at > 120e3) delete S.bp[key];
+    }
     render();
     if (S.outages.length && !S.outages[0].end) renderOutages();
   }
@@ -785,7 +849,8 @@
     if (n.soc != null) parts.push(n.soc + ' %');
     parts.push(n.mains === 'on' ? 'сеть есть' : n.mains === 'off' ? 'от батареи' : 'сеть неизвестна');
     if (n.eco === 'eco') parts.push('eco');
-    if (n.eco === 'deep') parts.push('глубокий eco');
+    if (n.eco === 'strong') parts.push('Сильный Eco');
+    if (n.eco === 'deep') parts.push('Максимальный Eco');
     setText('tb-chip', parts.join(' · '));
     chip.classList.toggle('on-battery', n.mains === 'off');
     show('tb-chip', true);
@@ -812,6 +877,8 @@
 
   // ---------- start ----------
   for (const b of document.querySelectorAll('#mode-seg button')) b.addEventListener('click', () => setMode(b.dataset.mode));
+  for (const b of document.querySelectorAll('#boosts .tog')) b.addEventListener('click', () => setBoost(b.dataset.boost));
+  $('dim-sw').addEventListener('click', () => setBoost('dim'));
   for (const b of document.querySelectorAll('#charge-menu button')) b.addEventListener('click', () => setCharge(b.dataset.charge));
   $('charge-btn').addEventListener('click', () => chargeMenu($('charge-menu').hidden));
   document.addEventListener('click', (e) => {

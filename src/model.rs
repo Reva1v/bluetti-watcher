@@ -141,14 +141,26 @@ impl MissReason {
     }
 }
 
-/// Уровень eco, который должен быть применён к ПК.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// Уровень eco, который должен быть применён к ПК. Порядок объявления — сила уровня. `Deep` на экране называется
+/// «Максимальный Eco», в JSON остаётся `"deep"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EcoLevel {
     #[default]
     None,
     Eco,
+    Strong,
     Deep,
+}
+
+/// Какие мониторы затемнены или должны быть затемнены: `Secondary` — все, кроме основного (запущена игра).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Dim {
+    #[default]
+    None,
+    Secondary,
+    All,
 }
 
 /// Состояние сети по принятым показаниям (FR-005).
@@ -192,6 +204,19 @@ mod tests {
         // Без связи с эфиром причина не меняется.
         assert_eq!(MissReason::BleOff.explain(Some(false)).0, "Bluetooth на ПК выключен или адаптера нет");
         assert!(MissReason::Timeout.explain(Some(false)).1.contains("телефон"));
+    }
+
+    #[test]
+    fn eco_levels_are_ordered_by_strength() {
+        assert!(
+            EcoLevel::None < EcoLevel::Eco
+                && EcoLevel::Eco < EcoLevel::Strong
+                && EcoLevel::Strong < EcoLevel::Deep
+        );
+        assert_eq!(EcoLevel::Strong.max(EcoLevel::Eco), EcoLevel::Strong);
+        assert_eq!(serde_json::to_string(&EcoLevel::Strong).unwrap(), "\"strong\"");
+        assert_eq!(serde_json::to_string(&EcoLevel::Deep).unwrap(), "\"deep\"");
+        assert_eq!(serde_json::from_str::<EcoLevel>("\"strong\"").unwrap(), EcoLevel::Strong);
     }
 
     #[test]

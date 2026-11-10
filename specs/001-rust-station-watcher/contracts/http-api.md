@@ -20,6 +20,8 @@
   "ecoAt": null,
   "eco": "deep",
   "manual": "auto",
+  "boost": { "strong": { "on": true, "auto": true }, "max": { "on": true, "auto": true }, "dim": true },
+  "dimmed": "all",
   "chargingMode": "silent",
   "hoursLeft": 3.6, "runtimeSource": "rate",
   "levels": { "low": true, "critical": false, "warn": false },
@@ -33,7 +35,10 @@
 ```
 
 - `stale`: последнее принятое показание старше 5 минут (цифры показываются как «последние известные»).
-- `mains`: `on` / `off` / `unknown`. `eco`: `none` / `eco` / `deep`. `manual`: `auto` / `eco` / `max`.
+- `mains`: `on` / `off` / `unknown`. `eco`: `none` / `eco` / `strong` / `deep` (на экране `deep` — «Максимальный Eco»). `manual`: `auto` / `eco` / `max`.
+- `boost`: переключатели «Сильный Eco» (`strong`), «Максимальный Eco» (`max`) — `on` и `auto` (включён порогом заряда, а не
+  владельцем) — и «Гасить мониторы» (`dim`, `true` — включено). `dimmed`: что затемнено сейчас — `none` / `secondary` (все,
+  кроме основного: запущена игра) / `all` (feature 005).
 - `chargingMode`: режим зарядки станции по последнему чтению (`standard` / `silent` / `turbo`); null — ещё не
   прочитан или станция показывает незнакомое значение.
 - `ecoAt`: когда включится eco, если сеть не вернётся (только пока сеть пропала, а отключение ещё не началось).
@@ -72,6 +77,14 @@ Server-Sent Events: `event: now`, `data: <тело /api/now>` после каж�
 
 Тело: `{ "mode": "auto" | "eco" | "max" }` → 202 `{ "manual": "max" }`; неизвестный режим → 400.
 Применяется сервисом в ближайшем цикле. Уровни батареи и гибернация действуют при любом режиме.
+
+## POST /api/boost
+
+Переключатели «Сильный Eco», «Максимальный Eco» и «Гасить мониторы» (feature 005); выбор Авто / Eco / Максимум они не
+меняют. Заголовок `X-Bluetti-Watcher: 1` обязателен (иначе 403). Тело — ровно один ключ: `{ "strong": true|false }`,
+`{ "max": true|false }` или `{ "dim": true|false }`; два ключа, другой ключ, не `true`/`false` или неверный JSON → 400.
+Ответ 202 с тем же телом; сервис применяет нажатия в ближайшем цикле (цикл запускается сразу, как после `/api/mode`).
+События `boost-manual`, затем `eco-strong` / `eco-deep` / `eco-off` и `dim-on` / `dim-off`.
 
 ## POST /api/check
 

@@ -1,4 +1,5 @@
-//! Уровни батареи и гибернация (FR-022…FR-027; design.md §6). Действуют при любом ручном режиме.
+//! Уровни батареи и гибернация (FR-022…FR-027; design.md §6). Действуют при любом ручном режиме; «Сильный Eco» и
+//! «Максимальный Eco» по порогам при «Максимум» сами не включаются (feature 005, FR-006).
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -7,19 +8,22 @@ use crate::clock::{MIN, SEC, Ts};
 use crate::config::Config;
 use crate::model::ManualMode;
 
+use super::boost::{self, Which};
 use super::guards::{backoff_due, backoff_fail, backoff_open};
 use super::{Action, DecisionState, Input};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Level {
+    /// «Сильный Eco» (по умолчанию 50 %). Первым: порядок объявления — порядок убывания заряда.
+    Strong,
     Low,
     Critical,
     Warn,
     Hibernate,
 }
 
-pub const ALL: [Level; 4] = [Level::Low, Level::Critical, Level::Warn, Level::Hibernate];
+pub const ALL: [Level; 5] = [Level::Strong, Level::Low, Level::Critical, Level::Warn, Level::Hibernate];
 
 /// Серия принятых показаний на батарее не выше уровня: начало и засчитанное время (шаг ≤ 2 × poll).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +39,7 @@ const RESUME_AFTER: Ts = 2 * MIN;
 
 pub fn threshold(l: Level, cfg: &Config) -> u8 {
     match l {
+        Level::Strong => cfg.levels.strong,
         Level::Low => cfg.levels.low,
         Level::Critical => cfg.levels.critical,
         Level::Warn => cfg.levels.warn,
@@ -73,12 +78,14 @@ pub fn effective_threshold(l: Level, rate: f64, cfg: &Config) -> u8 {
         Level::Warn => warn,
         Level::Critical => cfg.levels.critical.max(warn),
         Level::Low => cfg.levels.low.max(warn),
+        Level::Strong => cfg.levels.strong.max(warn),
     }
 }
 
 /// Вид уведомления уровня; по нему `report` узнаёт, какой уровень сработал.
 pub fn notify_kind(l: Level) -> Option<&'static str> {
     match l {
+        Level::Strong => None,
         Level::Low => Some("level-low"),
         Level::Critical => Some("level-critical"),
         Level::Warn => Some("hibernate-warn"),
@@ -147,7 +154,7 @@ pub fn ladder(
     out: &mut Vec<Action>,
 ) {
     retry_notifications(s, soc, now, cfg, out);
-    for l in [Level::Low, Level::Critical, Level::Warn] {
+    for l in [Level::Strong, Level::Low, Level::Critical, Level::Warn] {
         if reached(s, l) {
             continue;
         }
@@ -171,12 +178,27 @@ fn reach(s: &mut DecisionState, l: Level, soc: u8, now: Ts, cfg: &Config, out: &
     let Some(o) = &mut s.outage else { return };
     o.levels_reached.push(l);
     match l {
+        Level::Strong => {
+            let on = boost::on_threshold(s, Which::Strong);
+            let text = if on {
+                format!("Заряд {soc} % — включается «Сильный Eco»")
+            } else if s.manual == ManualMode::Max {
+                format!("Заряд {soc} % — «Сильный Eco» не включён: выбран «Максимум»")
+            } else {
+                format!("Заряд {soc} % — «Сильный Eco» выключен владельцем")
+            };
+            out.push(Action::Event {
+                kind: "level-strong",
+                text,
+                data: Some(json!({ "soc": soc, "strong": on })),
+            });
+        }
         Level::Low => {
-            o.deep = true;
+            let on = boost::on_threshold(s, Which::Max);
             out.push(Action::Event {
                 kind: "level-low",
                 text: format!("Заряд {soc} % — мало"),
-                data: Some(json!({ "soc": soc, "deep": s.manual != ManualMode::Max })),
+                data: Some(json!({ "soc": soc, "max": on })),
             });
         }
         Level::Critical => out.push(Action::Event {
@@ -204,9 +226,9 @@ fn notify(s: &DecisionState, l: Level, soc: u8, now: Ts, cfg: &Config) -> Option
     let kind = notify_kind(l)?;
     let text = match l {
         Level::Low if s.manual == ManualMode::Max => {
-            format!("Заряд {soc} % — мало. Выбран «Максимум»: глубокий eco не включён")
+            format!("Заряд {soc} % — мало. Выбран «Максимум»: Максимальный Eco не включён")
         }
-        Level::Low => format!("Заряд {soc} % — включён глубокий eco"),
+        Level::Low => format!("Заряд {soc} % — включён Максимальный Eco"),
         Level::Critical => format!("Заряд {soc} % — сохраните работу"),
         _ => {
             let n = warn_minutes(s, soc, now, cfg);
@@ -357,7 +379,7 @@ fn minutes_word(n: i64) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decision::Outage;
+    use crate::decision::{Outage, Switch};
 
     fn cfg() -> Config {
         Config::default()
@@ -373,6 +395,8 @@ mod tests {
             fresh: false,
             kill_switch: false,
             manual_request: None,
+            boost_requests: Vec::new(),
+            game_running: false,
         }
     }
 
@@ -400,13 +424,129 @@ mod tests {
             update_streaks(&mut s, soc, i as Ts * MIN, if i == 0 { 0 } else { MIN }, &c);
         }
         let mut seen = Vec::new();
-        for k in 0..3 {
+        for k in 0..4 {
             let mut out = Vec::new();
             ladder(&mut s, &input(), false, 4, (2 + k) * MIN, &c, &mut out);
             seen.push(out.iter().filter(|a| matches!(a, Action::Event { .. })).count());
         }
-        assert_eq!(seen, [1, 1, 1]);
-        assert_eq!(s.outage.as_ref().unwrap().levels_reached, [Level::Low, Level::Critical, Level::Warn]);
+        assert_eq!(seen, [1, 1, 1, 1]);
+        assert_eq!(
+            s.outage.as_ref().unwrap().levels_reached,
+            [Level::Strong, Level::Low, Level::Critical, Level::Warn]
+        );
+    }
+
+    /// Два согласных показания `soc` с разницей 2 минуты и один вызов лестницы; возвращает события.
+    fn rungs(s: &mut DecisionState, soc: u8, at: Ts) -> Vec<Action> {
+        let c = cfg();
+        update_streaks(s, soc, at, if at == 0 { 0 } else { 2 * MIN }, &c);
+        update_streaks(s, soc, at + 2 * MIN, 2 * MIN, &c);
+        let mut out = Vec::new();
+        ladder(s, &input(), false, soc, at + 2 * MIN, &c, &mut out);
+        out
+    }
+
+    fn reached_levels(s: &DecisionState) -> Vec<Level> {
+        s.outage.as_ref().unwrap().levels_reached.clone()
+    }
+
+    #[test]
+    fn strong_threshold_is_50_inclusive() {
+        for (soc, on) in [(51u8, false), (50, true), (49, true)] {
+            let mut s = in_outage();
+            let out = rungs(&mut s, soc, 0);
+            assert_eq!(s.boost.strong.on, on, "{soc} %");
+            assert_eq!(s.boost.strong.auto, on);
+            assert_eq!(reached_levels(&s) == [Level::Strong], on, "{soc} %");
+            assert_eq!(
+                out.iter().any(|a| matches!(a, Action::Event { kind: "level-strong", .. })),
+                on,
+                "{soc} %"
+            );
+            assert!(!s.boost.max.on, "максимальный на {soc} % не включается");
+            assert!(
+                out.iter().all(|a| !matches!(a, Action::Notify { .. })),
+                "у сильного нет уведомления Windows"
+            );
+        }
+    }
+
+    #[test]
+    fn max_threshold_is_20_inclusive_and_comes_after_strong() {
+        for (soc, on) in [(21u8, false), (20, true)] {
+            let mut s = in_outage();
+            rungs(&mut s, soc, 0);
+            assert!(s.boost.strong.on, "сильный уже включён на {soc} %");
+            assert!(!s.boost.max.on, "первым циклом включается только сильный");
+            let out = rungs(&mut s, soc, 4 * MIN);
+            assert_eq!(s.boost.max, Switch { on, auto: on }, "{soc} %");
+            assert_eq!(out.iter().any(|a| matches!(a, Action::Notify { kind: "level-low", .. })), on);
+        }
+    }
+
+    #[test]
+    fn each_threshold_fires_once_per_outage() {
+        let mut s = in_outage();
+        let mut events = 0;
+        for (i, soc) in [60u8, 50, 45, 30, 21, 20, 15, 12, 11].into_iter().enumerate() {
+            let out = rungs(&mut s, soc, i as Ts * 4 * MIN);
+            events += out
+                .iter()
+                .filter(|a| matches!(a, Action::Event { kind: "level-strong" | "level-low", .. }))
+                .count();
+        }
+        assert_eq!(events, 2, "по одному включению каждого уровня");
+        assert!(s.boost.strong.on && s.boost.max.on);
+    }
+
+    #[test]
+    fn thresholds_do_not_turn_levels_on_while_max_is_selected() {
+        let mut s = in_outage();
+        s.manual = ManualMode::Max;
+        let out = rungs(&mut s, 15, 0);
+        rungs(&mut s, 15, 4 * MIN);
+        assert_eq!(reached_levels(&s), [Level::Strong, Level::Low]);
+        assert!(!s.boost.strong.on && !s.boost.max.on);
+        let text = out.iter().find_map(|a| match a {
+            Action::Event { kind: "level-strong", text, .. } => Some(text.as_str()),
+            _ => None,
+        });
+        assert!(text.is_some_and(|t| t.contains("не включён")), "{text:?}");
+        // Ручное включение работает при любом выборе.
+        let mut sink = Vec::new();
+        boost::request(&mut s, boost::BoostRequest::Strong(true), &mut sink);
+        assert!(s.boost.strong.on);
+    }
+
+    #[test]
+    fn level_switched_off_by_the_owner_is_not_turned_on_again() {
+        let mut s = in_outage();
+        rungs(&mut s, 45, 0);
+        assert!(s.boost.strong.auto);
+        let mut sink = Vec::new();
+        boost::request(&mut s, boost::BoostRequest::Strong(false), &mut sink);
+        for (i, soc) in [44u8, 30, 25, 21].into_iter().enumerate() {
+            rungs(&mut s, soc, (i as Ts + 1) * 4 * MIN);
+        }
+        assert!(!s.boost.strong.on, "в этом отключении порог не включает его повторно");
+        assert!(!s.boost.max.on);
+        rungs(&mut s, 20, 6 * 4 * MIN);
+        assert!(s.boost.max.auto, "на 20 % включается максимальный");
+        assert!(!s.boost.strong.on);
+    }
+
+    #[test]
+    fn outage_started_below_the_strong_threshold_fires_it_at_the_first_agreed_cycle() {
+        let mut s = in_outage();
+        let out = rungs(&mut s, 40, 0);
+        assert!(s.boost.strong.auto);
+        assert!(out.iter().any(|a| matches!(a, Action::Event { kind: "level-strong", .. })));
+    }
+
+    #[test]
+    fn strong_threshold_has_no_notification_kind() {
+        assert_eq!(notify_kind(Level::Strong), None);
+        assert!(Level::Strong < Level::Low && Level::Hibernate > Level::Warn);
     }
 
     #[test]
@@ -416,6 +556,12 @@ mod tests {
         update_streaks(&mut s, 15, 0, 0, &c);
         update_streaks(&mut s, 15, 2 * MIN, 2 * MIN, &c);
         let mut out = Vec::new();
+        ladder(&mut s, &input(), false, 15, 2 * MIN, &c, &mut out);
+        assert!(
+            out.is_empty() || !out.iter().any(|a| matches!(a, Action::Notify { .. })),
+            "первой идёт сильная ступень"
+        );
+        out.clear();
         ladder(&mut s, &input(), false, 15, 2 * MIN, &c, &mut out);
         assert!(out.iter().any(|a| matches!(a, Action::Notify { kind: "level-low", .. })));
         report_notify(&mut s, "level-low", false, 2 * MIN);
@@ -455,6 +601,11 @@ mod tests {
         assert_eq!(effective_threshold(Level::Critical, 2.0, &c), 17, "критично не ниже предупреждения");
         assert_eq!(effective_threshold(Level::Critical, 0.0, &c), 10);
         assert_eq!(effective_threshold(Level::Low, 2.0, &c), 20);
+        assert_eq!(effective_threshold(Level::Strong, 0.0, &c), 50);
+        assert_eq!(effective_threshold(Level::Strong, 2.0, &c), 50);
+        let high_warn =
+            Config { levels: crate::config::Levels { warn: 55, ..c.levels.clone() }, ..c.clone() };
+        assert_eq!(effective_threshold(Level::Strong, 0.0, &high_warn), 55, "не ниже предупреждения");
     }
 
     #[test]

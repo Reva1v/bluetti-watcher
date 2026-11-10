@@ -7,6 +7,7 @@ use crate::clock::{SEC, Ts};
 use crate::config::Config;
 use crate::model::{EcoLevel, Mains, ManualMode, Reading};
 
+use super::boost;
 use super::guards::{self, backoff_due};
 use super::{Action, DecisionState, Outage};
 
@@ -75,7 +76,8 @@ pub fn update(
                         data: Some(json!({ "soc": s.mains_since_soc })),
                     });
                     end_manual(s, since, "сеть вернулась", out);
-                    s.backoff.retain(|k, _| k == ECO_KEY);
+                    boost::on_mains_back(s, out);
+                    s.backoff.retain(|k, _| k == ECO_KEY || k == boost::DIM_KEY);
                 }
             }
         }
@@ -111,16 +113,16 @@ pub fn set_manual(s: &mut DecisionState, m: ManualMode, now: Ts, out: &mut Vec<A
     });
 }
 
-/// Уровень eco, который должен стоять сейчас.
+/// Уровень eco, который должен стоять сейчас: самый сильный из уровня по выбору Авто / Eco / Максимум и уровня
+/// по переключателям «Сильный Eco» и «Максимальный Eco».
 pub fn desired(s: &DecisionState) -> EcoLevel {
-    let deep = s.outage.as_ref().is_some_and(|o| o.deep);
-    match s.manual {
+    let base = match s.manual {
         ManualMode::Max => EcoLevel::None,
-        _ if deep => EcoLevel::Deep,
         ManualMode::Eco => EcoLevel::Eco,
         ManualMode::Auto if s.outage.is_some() => EcoLevel::Eco,
         ManualMode::Auto => EcoLevel::None,
-    }
+    };
+    base.max(boost::level(s))
 }
 
 /// Новый желаемый уровень — `SetEco` сразу; неприменённый после ошибки — повтор по бэкоффу.
@@ -194,10 +196,82 @@ mod tests {
         assert_eq!(desired(&s), EcoLevel::Eco);
         s.manual = ManualMode::Max;
         assert_eq!(desired(&s), EcoLevel::None);
-        s.outage.as_mut().unwrap().deep = true;
-        assert_eq!(desired(&s), EcoLevel::None, "«Максимум» не пускает глубокий eco");
-        s.manual = ManualMode::Eco;
-        assert_eq!(desired(&s), EcoLevel::Deep);
+    }
+
+    #[test]
+    fn desired_level_is_the_strongest_of_selection_and_switches() {
+        use ManualMode::{Auto, Eco, Max};
+        // (выбор, отключение идёт, сильный, максимальный) -> уровень
+        let cases = [
+            (Auto, false, false, false, EcoLevel::None),
+            (Auto, true, false, false, EcoLevel::Eco),
+            (Eco, false, false, false, EcoLevel::Eco),
+            (Max, true, false, false, EcoLevel::None),
+            (Auto, false, true, false, EcoLevel::Strong),
+            (Auto, true, true, false, EcoLevel::Strong),
+            (Eco, true, true, false, EcoLevel::Strong),
+            (Max, false, true, false, EcoLevel::Strong),
+            (Max, true, true, false, EcoLevel::Strong),
+            (Auto, false, false, true, EcoLevel::Deep),
+            (Eco, true, false, true, EcoLevel::Deep),
+            (Max, false, false, true, EcoLevel::Deep),
+            (Max, true, false, true, EcoLevel::Deep),
+            (Auto, true, true, true, EcoLevel::Deep),
+            (Max, true, true, true, EcoLevel::Deep),
+        ];
+        for (manual, outage, strong, max, want) in cases {
+            let mut s = DecisionState { manual, ..Default::default() };
+            s.outage = outage.then(Outage::default);
+            s.boost.strong.on = strong;
+            s.boost.max.on = max;
+            assert_eq!(desired(&s), want, "{manual:?} outage={outage} strong={strong} max={max}");
+        }
+        // Выключение одного из двух: остаётся другой, затем уровень по выбору.
+        let mut s = DecisionState { outage: Some(Outage::default()), ..Default::default() };
+        s.boost.strong.on = true;
+        s.boost.max.on = true;
+        s.boost.max.on = false;
+        assert_eq!(desired(&s), EcoLevel::Strong);
+        s.boost.strong.on = false;
+        assert_eq!(desired(&s), EcoLevel::Eco, "в отключении возвращается обычный Eco, а не обычный режим");
+    }
+
+    fn mains_step(s: &mut DecisionState, m: Mains, i: i64, out: &mut Vec<Action>) {
+        update(s, m, Some(50), i * MIN, if i == 0 { 0 } else { MIN }, &Config::default(), out);
+    }
+
+    #[test]
+    fn manual_switch_survives_outage_start_and_is_cleared_by_confirmed_mains() {
+        let mut s = DecisionState::default();
+        let mut out = Vec::new();
+        super::boost::request(&mut s, crate::decision::BoostRequest::Strong(true), &mut out);
+        // Сеть есть, отключения нет: уровень держится сколько угодно.
+        for i in 0..10 {
+            mains_step(&mut s, Mains::On, i, &mut out);
+        }
+        assert!(s.boost.strong.on && s.outage.is_none());
+        assert_eq!(sync_desired(&mut s), EcoLevel::Strong);
+        // Начало отключения не снимает.
+        for i in 10..14 {
+            mains_step(&mut s, Mains::Off, i, &mut out);
+        }
+        assert!(s.outage.is_some() && s.boost.strong.on);
+        // Сеть вернулась, но ещё не подтверждена — держится; подтверждение снимает.
+        mains_step(&mut s, Mains::On, 14, &mut out);
+        mains_step(&mut s, Mains::On, 15, &mut out);
+        assert!(s.boost.strong.on && s.outage.is_some());
+        for i in 16..19 {
+            mains_step(&mut s, Mains::On, i, &mut out);
+        }
+        assert!(s.outage.is_none());
+        assert_eq!(s.boost.strong, crate::decision::Switch::default());
+        assert!(out.iter().any(|a| matches!(a, Action::Event { kind: "boost-off", .. })));
+    }
+
+    fn sync_desired(s: &mut DecisionState) -> EcoLevel {
+        let mut out = Vec::new();
+        sync_eco(s, 0, &mut out);
+        s.eco
     }
 
     #[test]

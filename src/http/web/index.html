@@ -117,9 +117,15 @@
       <button type="button" data-mode="eco" aria-pressed="false">Eco</button>
       <button type="button" data-mode="max" aria-pressed="false">Максимум</button>
     </div>
+    <div id="boosts" class="boosts" role="group" aria-label="Уровни экономии">
+      <button type="button" class="tog" data-boost="strong" aria-pressed="false">Сильный Eco<span class="auto-tag" hidden>авто</span></button>
+      <button type="button" class="tog" data-boost="max" aria-pressed="false">Максимальный Eco<span class="auto-tag" hidden>авто</span></button>
+    </div>
+    <button type="button" id="dim-sw" class="sw" role="switch" aria-checked="true"><span class="sw-box"></span>Гасить мониторы</button>
     <div class="mode-text">
       <span id="mode-title" class="mode-title"></span>
       <span id="mode-detail" class="dim"></span>
+      <span id="dim-line" class="dim" hidden></span>
       <span id="mode-err" class="err" role="alert" hidden></span>
     </div>
   </div>

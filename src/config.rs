@@ -34,6 +34,8 @@ pub struct Mains {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Levels {
+    /// Заряд в отключении, с которого включается «Сильный Eco» (выше `low`).
+    pub strong: u8,
     pub low: u8,
     pub critical: u8,
     pub warn: u8,
@@ -47,14 +49,24 @@ pub struct Levels {
 pub struct Eco {
     pub power_scheme: bool,
     pub cpu_max_pct: u8,
+    pub strong_cpu_max_pct: u8,
     pub deep_cpu_max_pct: u8,
     pub efficiency_overlay: bool,
     pub monitor_off_sec: u32,
     pub gpu: bool,
     pub gpu_pct: u8,
+    pub strong_gpu_pct: u8,
     pub deep_gpu_pct: u8,
     /// Остановить Windhawk и контейнер NVIDIA (Instant Replay) на время eco.
     pub stop_replay: bool,
+    /// Гасить мониторы на сильном и максимальном уровне.
+    pub dim: bool,
+    /// Яркость при затемнении, 0–100.
+    pub dim_pct: u8,
+    /// Запущена игра: основной монитор не гасить.
+    pub dim_skip_games: bool,
+    /// Имена exe игр не из Steam (сравнение без регистра).
+    pub game_processes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,7 +100,8 @@ pub struct ChargingAuto {
     pub enabled: bool,
     /// Свет включился, заряд ниже: «Турбо».
     pub turbo_below: u8,
-    /// Свет включился, заряд не ниже: «Тихая», а не «Стандартная» ради последних процентов до `silent_at`.
+    /// Свет включился, заряд не ниже: «Тихая». Ниже меньшего из `light_silent_at` и `silent_at` «Тихая» при сети
+    /// не держится (feature 006).
     pub light_silent_at: u8,
     /// Заряд дошёл: «Стандартная».
     pub standard_at: u8,
@@ -98,7 +111,7 @@ pub struct ChargingAuto {
 
 impl Default for ChargingAuto {
     fn default() -> Self {
-        Self { enabled: false, turbo_below: 20, light_silent_at: 75, standard_at: 50, silent_at: 80 }
+        Self { enabled: false, turbo_below: 20, light_silent_at: 90, standard_at: 50, silent_at: 90 }
     }
 }
 
@@ -126,6 +139,7 @@ impl Default for Config {
             station: Station { capacity_wh: 1440.0, efficiency: 0.85 },
             mains: Mains { lost_sec: 180, back_sec: 180 },
             levels: Levels {
+                strong: 50,
                 low: 20,
                 critical: 10,
                 warn: 7,
@@ -137,13 +151,19 @@ impl Default for Config {
             eco: Eco {
                 power_scheme: true,
                 cpu_max_pct: 80,
+                strong_cpu_max_pct: 65,
                 deep_cpu_max_pct: 50,
                 efficiency_overlay: true,
                 monitor_off_sec: 180,
                 gpu: true,
                 gpu_pct: 70,
+                strong_gpu_pct: 50,
                 deep_gpu_pct: 0,
                 stop_replay: true,
+                dim: true,
+                dim_pct: 0,
+                dim_skip_games: true,
+                game_processes: Vec::new(),
             },
             guards: Guards { soc_rate_per_min: 5.0, soc_jump_floor: 3, max_gap_sec: 600 },
             dtek: Dtek::default(),
@@ -216,6 +236,7 @@ pub fn parse(text: &str) -> Loaded {
             back_sec: r.int(Some("mains"), "back_sec", d.mains.back_sec as i64, 30, 3600) as u32,
         },
         levels: Levels {
+            strong: r.int(Some("levels"), "strong", d.levels.strong as i64, 1, 100) as u8,
             low: r.int(Some("levels"), "low", d.levels.low as i64, 1, 100) as u8,
             critical: r.int(Some("levels"), "critical", d.levels.critical as i64, 1, 100) as u8,
             warn: r.int(Some("levels"), "warn", d.levels.warn as i64, 1, 100) as u8,
@@ -239,6 +260,13 @@ pub fn parse(text: &str) -> Loaded {
         eco: Eco {
             power_scheme: r.boolean(Some("eco"), "power_scheme", d.eco.power_scheme),
             cpu_max_pct: r.int(Some("eco"), "cpu_max_pct", d.eco.cpu_max_pct as i64, 5, 100) as u8,
+            strong_cpu_max_pct: r.int(
+                Some("eco"),
+                "strong_cpu_max_pct",
+                d.eco.strong_cpu_max_pct as i64,
+                5,
+                100,
+            ) as u8,
             deep_cpu_max_pct: r.int(Some("eco"), "deep_cpu_max_pct", d.eco.deep_cpu_max_pct as i64, 5, 100)
                 as u8,
             efficiency_overlay: r.boolean(Some("eco"), "efficiency_overlay", d.eco.efficiency_overlay),
@@ -246,8 +274,13 @@ pub fn parse(text: &str) -> Loaded {
                 as u32,
             gpu: r.boolean(Some("eco"), "gpu", d.eco.gpu),
             gpu_pct: r.int(Some("eco"), "gpu_pct", d.eco.gpu_pct as i64, 0, 100) as u8,
+            strong_gpu_pct: r.int(Some("eco"), "strong_gpu_pct", d.eco.strong_gpu_pct as i64, 0, 100) as u8,
             deep_gpu_pct: r.int(Some("eco"), "deep_gpu_pct", d.eco.deep_gpu_pct as i64, 0, 100) as u8,
             stop_replay: r.boolean(Some("eco"), "stop_replay", d.eco.stop_replay),
+            dim: r.boolean(Some("eco"), "dim", d.eco.dim),
+            dim_pct: r.int(Some("eco"), "dim_pct", d.eco.dim_pct as i64, 0, 100) as u8,
+            dim_skip_games: r.boolean(Some("eco"), "dim_skip_games", d.eco.dim_skip_games),
+            game_processes: r.strings(Some("eco"), "game_processes"),
         },
         guards: Guards {
             soc_rate_per_min: r.float(
@@ -267,10 +300,10 @@ pub fn parse(text: &str) -> Loaded {
 
     let mut config = config;
     let l = &config.levels;
-    if !(l.low >= l.critical && l.critical >= l.warn && l.warn > l.hibernate) {
+    if !(l.strong > l.low && l.low >= l.critical && l.critical >= l.warn && l.warn > l.hibernate) {
         w.push(format!(
-            "уровни должны идти low ≥ critical ≥ warn > hibernate (сейчас {}/{}/{}/{}): взяты значения по умолчанию",
-            l.low, l.critical, l.warn, l.hibernate
+            "уровни должны идти strong > low ≥ critical ≥ warn > hibernate (сейчас {}/{}/{}/{}/{}): взяты значения по умолчанию",
+            l.strong, l.low, l.critical, l.warn, l.hibernate
         ));
         config.levels = d.levels;
     }
@@ -567,8 +600,8 @@ url = \"http://example.org/k.json\"
     #[test]
     fn charging_auto_defaults_and_threshold_order() {
         let d = parse("").config.charging_auto;
-        assert_eq!((d.enabled, d.turbo_below, d.standard_at, d.silent_at), (false, 20, 50, 80));
-        assert_eq!(d.light_silent_at, 75);
+        assert_eq!((d.enabled, d.turbo_below, d.standard_at, d.silent_at), (false, 20, 50, 90));
+        assert_eq!(d.light_silent_at, 90);
 
         let c = parse(
             "[charging_auto]
@@ -589,7 +622,7 @@ standard_at = 90
 ",
         );
         let a = &c.config.charging_auto;
-        assert_eq!((a.enabled, a.standard_at, a.silent_at), (true, 50, 80));
+        assert_eq!((a.enabled, a.standard_at, a.silent_at), (true, 50, 90));
         assert!(c.warnings.iter().any(|w| w.contains("charging_auto")), "{:?}", c.warnings);
     }
 }

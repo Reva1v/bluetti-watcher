@@ -30,7 +30,7 @@ A single Rust exe that reads the station over Bluetooth LE once a minute — no 
 | 🔋 **Reads the station over Bluetooth** | Once a minute: charge, AC/DC input and output, grid voltage. It changes exactly one station setting, the charging mode, and only when you press a button. |
 | 🌙 **Invisible in the background** | No window, console or tray icon; starts at Windows sign-in without admin rights. Idles at ~0 % CPU and a few megabytes of RAM. |
 | 📈 **Dashboard from a shortcut** | Its own frameless dark window: charge, time left, power, charts for 6 h / 24 h / 7 d / 30 d, outages and events. |
-| ⚡ **Eco during a power cut** | After 3 minutes without mains: the «Bluetti Eco» power plan (CPU up to 80 %, display off after 3 min, best power efficiency), an NVIDIA power limit, Windhawk and NVIDIA Instant Replay stopped. Deep eco at 20 %. |
+| ⚡ **Eco during a power cut** | After 3 minutes without mains: the «Bluetti Eco» power plan (CPU up to 80 %, display off after 3 min, best power efficiency), an NVIDIA power limit, Windhawk and NVIDIA Instant Replay stopped. «Strong Eco» at 50 %, «Maximum Eco» at 20 %: the monitors are dimmed too. |
 | 🛌 **Hibernation before empty** | A notification at 7 %, hibernation at 5 % — only after a fresh reading confirms it. With a fast drain the thresholds move up in advance. |
 | 🗓 **DTEK outage schedule** | Planned outages for today and tomorrow (Kyiv), as an hour grid like the DTEK app. The queue is picked from real outages the station sees. Display only. |
 
@@ -39,11 +39,12 @@ A single Rust exe that reads the station over Bluetooth LE once a minute — no 
 | When | What happens |
 |---|---|
 | No mains for 3 minutes | The outage starts, eco turns on |
-| Charge 20 % | Deep eco: CPU up to 50 %, GPU at its minimum limit, a notification |
+| Charge 50 % | «Сильный Eco» (Strong Eco): CPU up to 65 %, GPU at 50 % of its limit, monitor backlight to 0 |
+| Charge 20 % | «Максимальный Eco» (Maximum Eco): CPU up to 50 %, GPU at its minimum limit, monitors stay dimmed, a notification |
 | Charge 10 % | Notification «save your work» |
 | Charge 7 % | Notification: the PC will hibernate in about N minutes |
 | Charge 5 % | Hibernation, if a fresh reading confirms it |
-| Mains back for 3 minutes | The previous power plan, GPU limit and services come back |
+| Mains back for 3 minutes | The previous power plan, GPU limit, services and monitor brightness come back; both levels switch off |
 
 A level fires only after two agreeing readings. A charge jump (a glitch or the station recalibrating) is rejected, and if
 the low charge holds, hibernation waits for 10 minutes of confirmation. All thresholds are configurable.
@@ -51,6 +52,16 @@ the low charge holds, hibernation waits for 10 minutes of confirmation. All thre
 **PC mode buttons** (the UI is in Russian): «Авто» (Auto) — eco only during an outage; «Eco» — eco now, even on mains;
 «Максимум» (Max) — no saving until the next mains change or «Авто». Low-charge notifications and hibernation work in every mode; only the empty file `no-hibernate`
 turns hibernation off.
+
+**Strong Eco and Maximum Eco** are two separate toggle buttons under those three (the UI is in Russian: «Сильный Eco»,
+«Максимальный Eco»). They do not touch the Auto / Eco / Max choice and can both be on; the strongest level wins. You
+switch them yourself, and during a confirmed outage they also switch on by themselves at 50 % and 20 % (marked «авто»).
+With «Максимум» selected the thresholds switch nothing on, but the buttons still work. A confirmed return of mains switches
+both off, however they were turned on. The «Гасить мониторы» switch (dim the monitors, on by default) sets the real
+backlight brightness (DDC/CI) to `dim_pct` while either level is on and restores each monitor's previous value
+afterwards; turn it off to keep the monitors lit without dropping the level. While a game runs (Steam reports one, or a
+process from `game_processes` is running) the primary monitor is not dimmed and the others are. Monitors without DDC/CI
+are skipped.
 
 **Time left** uses the average load, not the momentary one: the all-time average for «if power goes out», the average
 since the outage began during a cut (or the measured discharge rate once there is enough data).
@@ -112,7 +123,8 @@ lost_sec = 180              # how long without mains before eco
 back_sec = 180
 
 [levels]
-low = 20                    # deep eco
+strong = 50                 # «Strong Eco»; must be above low
+low = 20                    # «Maximum Eco»
 critical = 10
 warn = 7
 hibernate = 5
@@ -120,13 +132,19 @@ hibernate = 5
 [eco]
 power_scheme = true
 cpu_max_pct = 80
-deep_cpu_max_pct = 50
+strong_cpu_max_pct = 65
+deep_cpu_max_pct = 50       # «Maximum Eco»
 efficiency_overlay = true
 monitor_off_sec = 180
 gpu = true
 gpu_pct = 70                # of the default limit, never below the card's minimum
+strong_gpu_pct = 50
 deep_gpu_pct = 0            # 0 = the card's minimum
 stop_replay = true          # stop Windhawk, then the NVIDIA container (Instant Replay)
+dim = true                  # dim the monitors on Strong and Maximum Eco
+dim_pct = 0                 # backlight while dimmed, 0-100
+dim_skip_games = true       # a game is running: keep the primary monitor lit
+game_processes = []         # exe names of non-Steam games, e.g. ["eldenring.exe"]
 
 [dtek]
 enabled = false
@@ -139,9 +157,9 @@ warn_min = 60               # Windows notification this many minutes before a pl
 [charging_auto]
 enabled = false             # charging mode by rules; on PC shutdown or restart: silent
 turbo_below = 20            # power is back and charge is below: turbo, otherwise standard
-light_silent_at = 75        # power is back and charge is at least: silent
+light_silent_at = 90        # power is back and charge is at least: silent
 standard_at = 50            # charge reached: standard
-silent_at = 80              # charge reached: silent
+silent_at = 90              # charge reached: silent; below it on mains, silent is replaced with standard
 ```
 
 Every key and its limits: [contracts/cli-config.md](specs/001-rust-station-watcher/contracts/cli-config.md); the

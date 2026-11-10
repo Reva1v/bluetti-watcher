@@ -1,6 +1,8 @@
 //! Eco-режим ПК (research.md R3): схема «Bluetti Eco», оверлей энергоэффективности, лимит GPU.
 //! Логика — `PowerControl` поверх трейта `PowerBackend`; системные вызовы — `WindowsPower`.
 
+pub mod brightness;
+pub mod games;
 pub mod gpu;
 pub mod hibernate;
 pub mod scheme;
@@ -175,7 +177,7 @@ impl<B: PowerBackend> PowerControl<B> {
     ) -> (Option<PowerRestore>, Vec<PartResult>) {
         match level {
             EcoLevel::None => self.restore(saved),
-            EcoLevel::Eco | EcoLevel::Deep => self.enter(level, saved),
+            EcoLevel::Eco | EcoLevel::Strong | EcoLevel::Deep => self.enter(level, saved),
         }
     }
 
@@ -242,7 +244,11 @@ impl<B: PowerBackend> PowerControl<B> {
                 return;
             }
         };
-        let cpu = if level == EcoLevel::Deep { self.cfg.deep_cpu_max_pct } else { self.cfg.cpu_max_pct };
+        let cpu = match level {
+            EcoLevel::Deep => self.cfg.deep_cpu_max_pct,
+            EcoLevel::Strong => self.cfg.strong_cpu_max_pct,
+            _ => self.cfg.cpu_max_pct,
+        };
         let tag = |s: String| if dry { format!("dry run: {s}") } else { s };
 
         let r = if dry {

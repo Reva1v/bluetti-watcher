@@ -1,6 +1,7 @@
 //! Чистое ядро решений (конституция II, V): показание, состояние, время и конфиг на входе — статус показания,
 //! действия и новое состояние на выходе. Без I/O и системных часов; `now` — время получения показания.
 
+pub mod boost;
 pub mod charging;
 pub mod guards;
 pub mod levels;
@@ -12,8 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::clock::Ts;
 use crate::config::Config;
-use crate::model::{EcoLevel, Mains, ManualMode, MissReason, ReadStatus, Reading};
+use crate::model::{Dim, EcoLevel, Mains, ManualMode, MissReason, ReadStatus, Reading};
 
+pub use boost::{Boost, BoostRequest, Switch};
 pub use guards::{Backoff, Verdict};
 pub use levels::{Level, Streak};
 
@@ -26,6 +28,10 @@ pub struct Input {
     pub kill_switch: bool,
     /// Кнопка на дашборде с прошлого цикла.
     pub manual_request: Option<ManualMode>,
+    /// Нажатия «Сильный Eco» / «Максимальный Eco» / «Гасить мониторы» с прошлого цикла, по порядку.
+    pub boost_requests: Vec<BoostRequest>,
+    /// Запущена игра (спрашивается у системы перед каждым решением, FR-016).
+    pub game_running: bool,
 }
 
 /// Текущее отключение (data-model.md).
@@ -37,8 +43,11 @@ pub struct Outage {
     pub soc_start: Option<u8>,
     /// `false` после сброса по пропуску, пока сеть не подтверждена заново: уровни не срабатывают.
     pub confirmed: bool,
-    /// Был уровень «мало»: глубокий eco до конца отключения (переживает сброс по пропуску).
-    pub deep: bool,
+    /// Порог уже включал «Сильный Eco» в этом отключении: после сброса по пропуску уровень, выключенный владельцем,
+    /// не включается снова (FR-007).
+    pub strong_fired: bool,
+    /// То же для «Максимального Eco».
+    pub max_fired: bool,
     /// Уровни, до которых дошла лестница.
     pub levels_reached: Vec<Level>,
     /// Уровни, чьё действие выполнено успешно.
@@ -69,6 +78,12 @@ pub struct DecisionState {
     pub eco: EcoLevel,
     /// Последний успешно применённый уровень eco.
     pub eco_applied: EcoLevel,
+    /// Переключатели «Сильный Eco», «Максимальный Eco» и «Гасить мониторы» (feature 005).
+    pub boost: Boost,
+    /// Желаемое затемнение мониторов.
+    pub dim: Dim,
+    /// Последнее успешно применённое затемнение.
+    pub dim_applied: Dim,
     pub backoff: BTreeMap<String, Backoff>,
     /// Последний rebase (или скачок после пропуска) до подтверждённого возврата сети.
     pub rebase_at: Option<Ts>,
@@ -96,6 +111,8 @@ pub struct Decision {
 pub enum Action {
     /// Желаемый уровень eco изменился (или повтор после ошибки).
     SetEco(EcoLevel),
+    /// Желаемое затемнение мониторов изменилось (или повтор после ошибки).
+    SetDim(Dim),
     /// Уведомление Windows, текст по-русски.
     Notify {
         kind: &'static str,
@@ -125,6 +142,9 @@ pub fn decide(state: &mut DecisionState, input: &Input, now: Ts, cfg: &Config) -
     let mut out = Vec::new();
     if let Some(m) = input.manual_request {
         mains::set_manual(s, m, now, &mut out);
+    }
+    for &r in &input.boost_requests {
+        boost::request(s, r, &mut out);
     }
     // Свежее показание засчитывается только в ответ на `NeedFreshReading`; запрос живёт один цикл.
     let fresh_ok = input.fresh && s.fresh_pending;
@@ -158,7 +178,9 @@ pub fn decide(state: &mut DecisionState, input: &Input, now: Ts, cfg: &Config) -
             }
         },
     };
+    boost::settle(s);
     mains::sync_eco(s, now, &mut out);
+    boost::sync_dim(s, input.game_running, now, &mut out);
     Decision { status, reason, actions: out }
 }
 
@@ -184,6 +206,7 @@ fn accept(s: &mut DecisionState, r: &Reading, now: Ts, cfg: &Config) -> Ts {
 pub fn report(state: &mut DecisionState, action: &Action, ok: bool, now: Ts) {
     match action {
         Action::SetEco(l) => mains::report_eco(state, *l, ok, now),
+        Action::SetDim(d) => boost::report_dim(state, *d, ok, now),
         Action::Hibernate => levels::report_hibernate(state, ok, now),
         Action::Notify { kind, .. } => levels::report_notify(state, kind, ok, now),
         _ => {}
@@ -199,6 +222,9 @@ pub struct View {
     /// Желаемый уровень eco.
     pub eco: EcoLevel,
     pub manual: ManualMode,
+    pub boost: Boost,
+    /// Что затемнено сейчас.
+    pub dimmed: Dim,
     pub level_low: bool,
     pub level_critical: bool,
     pub level_warn: bool,
@@ -213,6 +239,8 @@ pub fn view(state: &DecisionState, now: Ts, cfg: &Config) -> View {
         eco_at: mains::eco_at(state, now, cfg),
         eco: state.eco,
         manual: state.manual,
+        boost: state.boost.clone(),
+        dimmed: state.dim_applied,
         level_low: reached(Level::Low),
         level_critical: reached(Level::Critical),
         level_warn: reached(Level::Warn),
@@ -229,6 +257,8 @@ mod tests {
     fn state_round_trips_through_json() {
         let mut s = DecisionState {
             outage: Some(Outage { start_ts: 5, levels_reached: vec![Level::Low], ..Default::default() }),
+            boost: Boost { strong: Switch { on: true, auto: true }, ..Default::default() },
+            dim: Dim::All,
             ..Default::default()
         };
         s.level_streaks.insert(Level::Warn, Streak { since: 1, run_ms: 2 });
@@ -239,6 +269,14 @@ mod tests {
         // Старое или неполное состояние читается с умолчаниями.
         let partial: DecisionState = serde_json::from_str(r#"{"manual":"max"}"#).unwrap();
         assert_eq!(partial.manual, ManualMode::Max);
+        // Состояние до feature 005: в отключении лишний ключ `deep` читается и игнорируется.
+        let old: DecisionState = serde_json::from_str(
+            r#"{"outage":{"start_ts":7,"confirmed":true,"deep":true,"levels_reached":["low"]}}"#,
+        )
+        .unwrap();
+        let o = old.outage.unwrap();
+        assert_eq!((o.start_ts, o.confirmed, o.levels_reached), (7, true, vec![Level::Low]));
+        assert_eq!(old.boost, Boost::default());
     }
 
     #[test]
@@ -250,6 +288,8 @@ mod tests {
             fresh: false,
             kill_switch: false,
             manual_request: None,
+            boost_requests: Vec::new(),
+            game_running: false,
         };
         decide(&mut s, &rd(0, 60), 0, &c);
         decide(&mut s, &rd(MIN, 60), MIN, &c);

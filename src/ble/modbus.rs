@@ -104,7 +104,7 @@ pub fn parse_read_response(resp: &[u8], count: u16) -> Result<Vec<u16>, ModbusEr
     if resp[2] as usize != 2 * count as usize {
         return Err(ModbusError::Unexpected("длина данных не совпадает с запросом"));
     }
-    Ok(resp[3..want - 2].chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect())
+    Ok(resp[3..want - 2].as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes(*c)).collect())
 }
 
 /// Ответ на запись `req`: `Ok` — станция повторила кадр (значение принято), `Err` — исключение или чужой кадр.

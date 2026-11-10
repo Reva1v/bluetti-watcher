@@ -14,7 +14,7 @@ pub const MANAGED: [(&str, &[&str]); 2] = [
 ];
 
 /// Что сделать со службами для уровня; `stopped` — службы, которые программа остановила раньше.
-/// Eco/Deep: остановить запущенные (по порядку `MANAGED`). Normal: запустить только остановленные нами (в обратном
+/// Eco/Strong/Deep: остановить запущенные (по порядку `MANAGED`). Normal: запустить только остановленные нами (в обратном
 /// порядке: NVIDIA, затем Windhawk, чтобы мод снова подхватил процесс).
 pub fn plan(level: EcoLevel, running: &[&str], stopped: &[String]) -> Vec<(String, bool)> {
     match level {
@@ -24,7 +24,7 @@ pub fn plan(level: EcoLevel, running: &[&str], stopped: &[String]) -> Vec<(Strin
             .filter(|(s, _)| stopped.iter().any(|x| x == s))
             .map(|(s, _)| ((*s).to_string(), true))
             .collect(),
-        EcoLevel::Eco | EcoLevel::Deep => MANAGED
+        EcoLevel::Eco | EcoLevel::Strong | EcoLevel::Deep => MANAGED
             .iter()
             .filter(|(s, _)| running.contains(s))
             .map(|(s, _)| ((*s).to_string(), false))
@@ -192,6 +192,7 @@ mod tests {
             plan(EcoLevel::Deep, &["NvContainerLocalSystem"], &[]),
             vec![("NvContainerLocalSystem".into(), false)]
         );
+        assert_eq!(plan(EcoLevel::Strong, &["Windhawk"], &[]), vec![("Windhawk".into(), false)]);
     }
 
     #[test]

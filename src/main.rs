@@ -168,6 +168,7 @@ async fn cmd_run(paths: &paths::Paths, dry_run: bool) -> ExitCode {
     let (health_tx, health_rx) = tokio::sync::watch::channel(http::HealthView::default());
     let (events_tx, _) = tokio::sync::broadcast::channel(64);
     let (mode_tx, mode_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (boost_tx, boost_rx) = tokio::sync::mpsc::unbounded_channel();
     let (check_tx, check_rx) = tokio::sync::mpsc::unbounded_channel();
     let (charging_tx, charging_rx) = tokio::sync::mpsc::unbounded_channel();
     let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -182,6 +183,7 @@ async fn cmd_run(paths: &paths::Paths, dry_run: bool) -> ExitCode {
         now: now_rx,
         events: events_tx.clone(),
         mode_tx,
+        boost_tx,
         check_tx,
         charging_tx,
         health: health_rx,
@@ -204,6 +206,7 @@ async fn cmd_run(paths: &paths::Paths, dry_run: bool) -> ExitCode {
         health: health_tx,
         events: events_tx,
         modes: mode_rx,
+        boosts: boost_rx,
         checks: check_rx,
         charging: charging_rx,
         shutdown: shutdown_rx,
@@ -211,6 +214,7 @@ async fn cmd_run(paths: &paths::Paths, dry_run: bool) -> ExitCode {
     };
     bluetti_watcher::memory::spawn_trimmer(std::time::Duration::from_secs(10));
     let reader = service::WinRtReader::new(cfg.mac);
+    let games = Box::new(power::games::WindowsGames::new(&cfg.eco));
     let mut svc = service::Service::new(
         cfg,
         store,
@@ -219,6 +223,8 @@ async fn cmd_run(paths: &paths::Paths, dry_run: bool) -> ExitCode {
         power,
         hibernator,
         notifier,
+        Box::new(power::brightness::WindowsBrightness),
+        games,
         paths.kill_switch(),
         channels,
     );
