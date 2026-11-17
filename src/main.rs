@@ -223,7 +223,7 @@ async fn cmd_run(paths: &paths::Paths, dry_run: bool) -> ExitCode {
         power,
         hibernator,
         notifier,
-        Box::new(power::brightness::WindowsBrightness),
+        Box::new(power::brightness::WindowsBrightness::default()),
         games,
         paths.kill_switch(),
         channels,
