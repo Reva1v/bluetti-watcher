@@ -1001,8 +1001,8 @@ mod tests {
         let notes = Rc::new(RefCell::new(Vec::new()));
         let screens = Rc::new(RefCell::new(Screens {
             monitors: vec![
-                Monitor { id: "A".into(), primary: true, min: 0, cur: 100, max: 100 },
-                Monitor { id: "B".into(), primary: false, min: 0, cur: 70, max: 100 },
+                Monitor { id: "A".into(), label: "A".into(), primary: true, min: 0, cur: 100, max: 100 },
+                Monitor { id: "B".into(), label: "B".into(), primary: false, min: 0, cur: 70, max: 100 },
             ],
             writes: Vec::new(),
             lists: 0,

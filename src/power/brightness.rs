@@ -13,10 +13,13 @@ pub use crate::model::Dim;
 /// не отвечает по DDC/CI, а при смене раскладки дисплеев он не вернётся совсем.
 pub const MAX_MISSES: u32 = 5;
 
-/// Монитор, отдавший яркость. `id` — имя дисплея и номер физического монитора (`\\.\DISPLAY1#0`).
+/// Монитор, отдавший яркость. `id` — постоянная личность монитора (модель и экземпляр устройства,
+/// `AUS258A#5&1ba1d4b0&0&UID33029`): имена `\\.\DISPLAYn` Windows раздаёт заново, когда монитор пропадает со связи.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Monitor {
     pub id: String,
+    /// Для истории: модель и текущее имя дисплея (`AUS258A (\\.\DISPLAY1)`).
+    pub label: String,
     /// Основной монитор Windows.
     pub primary: bool,
     pub min: u32,
@@ -60,6 +63,30 @@ pub struct DimRestore {
     pub misses: BTreeMap<String, u32>,
     /// Сколько попыток подряд монитор, который нужно затемнить, был на месте, но не отдал яркость.
     pub unanswered: BTreeMap<String, u32>,
+}
+
+/// Постоянная личность монитора из имени его интерфейса (`\\?\DISPLAY#AUS258A#5&…&UID33029#{guid}` →
+/// `AUS258A#5&…&UID33029`); `None` — имя не того вида.
+pub fn stable_id(interface: &str) -> Option<String> {
+    let mut parts = interface.strip_prefix(r"\\?\")?.split('#');
+    let (_, model, instance) = (parts.next()?, parts.next()?, parts.next()?);
+    (!model.is_empty() && !instance.is_empty()).then(|| format!("{model}#{instance}"))
+}
+
+/// `id` и `label` физического монитора `index` дисплея `display`; `interface` — имя его интерфейса, если Windows его
+/// отдала. Без него — прежний `\\.\DISPLAYn#i`.
+pub fn identify(display: &str, index: usize, interface: Option<&str>) -> (String, String) {
+    match interface.and_then(stable_id) {
+        Some(id) => {
+            let model = id.split('#').next().unwrap_or_default();
+            let label = format!("{model} ({display})");
+            (id, label)
+        }
+        None => {
+            let id = format!("{display}#{index}");
+            (id.clone(), id)
+        }
+    }
 }
 
 /// Яркость затемнения: `min + (max − min) × pct / 100`.
@@ -127,10 +154,13 @@ pub fn apply(
             // или сбой в прошлый раз, пишем снова.
             if m.cur != value && (fresh.contains(&m.id) || m.cur == before) {
                 parts.push(match write(b, value) {
-                    Ok(()) => {
-                        PartResult::ok("dim", tag(format!("монитор {}: яркость {} → {value}", m.id, m.cur)))
+                    Ok(()) => PartResult::ok(
+                        "dim",
+                        tag(format!("монитор {}: яркость {} → {value}", m.label, m.cur)),
+                    ),
+                    Err(e) => {
+                        PartResult::fail("dim", format!("монитор {}: яркость не записана: {e}", m.label))
                     }
-                    Err(e) => PartResult::fail("dim", format!("монитор {}: яркость не записана: {e}", m.id)),
                 });
             }
         } else if let Some(&prev) = restore.monitors.get(&m.id) {
@@ -139,11 +169,12 @@ pub fn apply(
             parts.push(match res {
                 Ok(()) => {
                     restore.monitors.remove(&m.id);
-                    PartResult::ok("dim", tag(format!("монитор {}: яркость возвращена ({value})", m.id)))
+                    PartResult::ok("dim", tag(format!("монитор {}: яркость возвращена ({value})", m.label)))
                 }
-                Err(e) => {
-                    PartResult::fail("dim", format!("монитор {}: яркость {value} не возвращена: {e}", m.id))
-                }
+                Err(e) => PartResult::fail(
+                    "dim",
+                    format!("монитор {}: яркость {value} не возвращена: {e}", m.label),
+                ),
             });
         }
     }
@@ -218,11 +249,45 @@ mod win {
     };
     use windows::Win32::Foundation::{HANDLE, LPARAM, RECT};
     use windows::Win32::Graphics::Gdi::{
-        EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+        DISPLAY_DEVICE_ACTIVE, DISPLAY_DEVICEW, EnumDisplayDevicesW, EnumDisplayMonitors, GetMonitorInfoW,
+        HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
     };
-    use windows::core::BOOL;
+    use windows::core::{BOOL, PCWSTR};
 
-    use super::{Brightness, DDC_TRIES, Monitor, retry};
+    use super::{Brightness, DDC_TRIES, Monitor, identify, retry};
+
+    /// `EDD_GET_DEVICE_INTERFACE_NAME`: `DeviceID` — имя интерфейса монитора, а не его PnP-код.
+    const EDD_GET_DEVICE_INTERFACE_NAME: u32 = 1;
+
+    /// Имя интерфейса `index`-го активного монитора дисплея `display` (`\\?\DISPLAY#AUS258A#…#{guid}`).
+    fn interface(display: &str, index: usize) -> Option<String> {
+        let wide: Vec<u16> = display.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut active = 0usize;
+        for n in 0..16u32 {
+            let mut dd =
+                DISPLAY_DEVICEW { cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
+            // SAFETY: `wide` оканчивается нулём и живёт до конца вызова; `cb` указывает размер структуры.
+            let ok = unsafe {
+                EnumDisplayDevicesW(PCWSTR(wide.as_ptr()), n, &mut dd, EDD_GET_DEVICE_INTERFACE_NAME)
+            };
+            if !ok.as_bool() {
+                return None;
+            }
+            if dd.StateFlags & DISPLAY_DEVICE_ACTIVE == DISPLAY_DEVICE_ACTIVE {
+                if active == index {
+                    let len = dd.DeviceID.iter().position(|&c| c == 0).unwrap_or(dd.DeviceID.len());
+                    return Some(String::from_utf16_lossy(&dd.DeviceID[..len]));
+                }
+                active += 1;
+            }
+        }
+        None
+    }
+
+    /// `id` и `label` физического монитора.
+    fn ident(display: &str, index: usize) -> (String, String) {
+        identify(display, index, interface(display, index).as_deref())
+    }
 
     /// Пауза между повторами команды DDC/CI.
     const DDC_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
@@ -312,9 +377,9 @@ mod win {
                     let ok = unsafe { GetMonitorBrightness(handle, &mut min, &mut cur, &mut max) };
                     (ok != 0 && max >= min).then_some((min, cur, max))
                 });
-                let id = format!("{name}#{i}");
+                let (id, label) = ident(name, i);
                 match read {
-                    Some((min, cur, max)) => out.push(Monitor { id, primary, min, cur, max }),
+                    Some((min, cur, max)) => out.push(Monitor { id, label, primary, min, cur, max }),
                     None => silent.push((id, primary)),
                 }
                 false
@@ -326,7 +391,7 @@ mod win {
         fn set(&mut self, id: &str, value: u32) -> Result<(), String> {
             let mut result = Err(format!("монитор {id} не найден"));
             walk(|name, _, i, handle| {
-                if format!("{name}#{i}") != id {
+                if ident(name, i).0 != id {
                     return false;
                 }
                 // SAFETY: дескриптор действителен внутри `walk`.
@@ -366,7 +431,7 @@ mod tests {
     }
 
     fn mon(id: &str, primary: bool, cur: u32) -> Monitor {
-        Monitor { id: id.into(), primary, min: 0, cur, max: 100 }
+        Monitor { id: id.into(), label: id.into(), primary, min: 0, cur, max: 100 }
     }
 
     impl Fake {
@@ -575,7 +640,7 @@ mod tests {
 
     #[test]
     fn dim_pct_and_nonzero_min_are_honoured() {
-        let m = Monitor { id: "A".into(), primary: true, min: 10, cur: 80, max: 90 };
+        let m = Monitor { id: "A".into(), label: "A".into(), primary: true, min: 10, cur: 80, max: 90 };
         assert_eq!((dim_value(&m, 0), dim_value(&m, 50), dim_value(&m, 100)), (10, 50, 90));
         let mut f = Fake { monitors: vec![m], ..Default::default() };
         let (saved, _) = run(&mut f, Dim::All, None, 25);
@@ -809,5 +874,72 @@ mod tests {
         assert_eq!((got, calls, pauses), (None, 3, 2), "без паузы после последней попытки");
         let got = retry(0, || panic!("пауза"), || Some(1));
         assert_eq!(got, None, "ноль попыток — ни одного вызова");
+    }
+
+    #[test]
+    fn stable_id_takes_model_and_instance() {
+        let iface = r"\\?\DISPLAY#AUS258A#5&1ba1d4b0&0&UID33029#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}";
+        assert_eq!(stable_id(iface).as_deref(), Some("AUS258A#5&1ba1d4b0&0&UID33029"));
+        assert_eq!(
+            stable_id(r"\\?\DISPLAY#AUS258A#UID1").as_deref(),
+            Some("AUS258A#UID1"),
+            "без хвоста GUID"
+        );
+        assert_eq!(stable_id(""), None);
+        assert_eq!(stable_id(r"\\.\DISPLAY1"), None, "имя дисплея, а не интерфейса");
+        assert_eq!(stable_id(r"\\?\DISPLAY"), None, "без модели");
+        assert_eq!(stable_id(r"\\?\DISPLAY#AUS258A"), None, "без экземпляра");
+        assert_eq!(stable_id(r"\\?\DISPLAY##UID1#x"), None, "пустая модель");
+        assert_eq!(stable_id(r"\\?\DISPLAY#AUS258A##x"), None, "пустой экземпляр");
+    }
+
+    #[test]
+    fn identify_prefers_the_interface_and_falls_back_to_the_display_name() {
+        let iface = r"\\?\DISPLAY#AUS258A#5&1&UID33029#{guid}";
+        assert_eq!(
+            identify(r"\\.\DISPLAY1", 0, Some(iface)),
+            ("AUS258A#5&1&UID33029".to_string(), r"AUS258A (\\.\DISPLAY1)".to_string())
+        );
+        // Тот же монитор под другим именем дисплея — тот же id.
+        assert_eq!(identify(r"\\.\DISPLAY2", 0, Some(iface)).0, "AUS258A#5&1&UID33029");
+        let old = r"\\.\DISPLAY2#1".to_string();
+        assert_eq!(identify(r"\\.\DISPLAY2", 1, None), (old.clone(), old.clone()));
+        assert_eq!(identify(r"\\.\DISPLAY2", 1, Some("мусор")), (old.clone(), old));
+    }
+
+    #[test]
+    fn restore_follows_the_monitor_when_windows_renumbers_displays() {
+        // Случай 2026-11-17: ASUS был DISPLAY2, вернулся со связи как DISPLAY1, Acer сдвинулся на DISPLAY2.
+        let mut asus = mon("AUS", true, 100);
+        asus.label = r"AUS (\\.\DISPLAY2)".into();
+        let mut acer = mon("ACR", false, 80);
+        acer.label = r"ACR (\\.\DISPLAY1)".into();
+        let mut f = Fake { monitors: vec![asus, acer], ..Default::default() };
+        let (saved, _) = run(&mut f, Dim::All, None, 0);
+        assert_eq!((f.cur("AUS"), f.cur("ACR")), (0, 0));
+
+        // ASUS пропал со связи: Acer возвращён, ASUS ждёт.
+        let asus = f.monitors.remove(0);
+        let (saved, parts) = run(&mut f, Dim::None, saved, 0);
+        assert_eq!(f.cur("ACR"), 80);
+        assert_eq!(failed(&parts), 1, "ASUS не найден — повтор");
+        let saved = saved.expect("яркость ASUS ещё сохранена");
+        assert_eq!(saved.monitors.get("AUS"), Some(&100));
+
+        // ASUS вернулся под другим именем дисплея: id тот же, яркость возвращена ему, Acer не тронут.
+        let mut asus = asus;
+        asus.label = r"AUS (\\.\DISPLAY1)".into();
+        f.monitors.push(asus);
+        f.log.clear();
+        let (saved, parts) = run(&mut f, Dim::None, Some(saved), 0);
+        assert_eq!((f.cur("AUS"), f.cur("ACR")), (100, 80));
+        assert_eq!(f.writes(), vec!["set AUS 100".to_string()]);
+        assert_eq!(failed(&parts), 0);
+        assert!(saved.is_none());
+        assert!(
+            parts[0].detail.contains(r"AUS (\\.\DISPLAY1)"),
+            "в истории текущее имя: {}",
+            parts[0].detail
+        );
     }
 }
