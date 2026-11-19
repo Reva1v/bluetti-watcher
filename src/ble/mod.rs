@@ -40,6 +40,9 @@ pub struct ReadOptions {
     pub handshake_timeout: Duration,
     /// Сколько ждать ответа на один блок.
     pub answer_timeout: Duration,
+    /// Сколько ждать второго кадра после неоднозначного ответа: станция отвечает за десятки миллисекунд,
+    /// так что тишина после него значит, что старый запрос так и остался без ответа.
+    pub settle: Duration,
     /// Общий предел цикла.
     pub total_timeout: Duration,
 }
@@ -51,6 +54,7 @@ impl Default for ReadOptions {
             challenge_wait: Duration::from_secs(3),
             handshake_timeout: Duration::from_secs(10),
             answer_timeout: Duration::from_secs(5),
+            settle: Duration::from_millis(700),
             total_timeout: Duration::from_secs(30),
         }
     }
@@ -123,6 +127,13 @@ impl Unanswered {
         Claim::Ours
     }
 
+    /// Станция замолчала после неоднозначного ответа, значит поздних ответов той же длины больше не будет:
+    /// вычеркнуть все такие запросы, свои и чужие, чтобы переспрос начался с чистого журнала.
+    fn settle(&mut self, count: u16) {
+        let len = modbus::response_len(count);
+        self.0.retain(|e| modbus::response_len(e.1) != len);
+    }
+
     /// Пришёл кадр, который не ответ на запись: вычеркнуть запрос чтения, которому он мог быть ответом.
     fn forget(&mut self, frame: &[u8]) {
         let exception = modbus::is_exception(frame);
@@ -130,7 +141,7 @@ impl Unanswered {
     }
 }
 
-/// Сколько раз переспросить блок, если ответ мог быть поздним ответом на другой.
+/// Сколько раз переспросить блок, если после неоднозначного ответа станция замолчала.
 const MAX_REASK: u32 = 2;
 
 /// Одно чтение: подключение, рукопожатие (если станция шифрует), три блока, отключение — всегда.
@@ -277,22 +288,31 @@ async fn read_block<T: Transport>(
         link.send(t, &modbus::read_request(addr, count)).await?;
         unanswered.sent(addr, count);
         let deadline = Instant::now() + opts.answer_timeout;
+        let mut wait_until = deadline;
         loop {
-            let resp = link.next(buf, deadline).await?;
+            let resp = match link.next(buf, wait_until).await {
+                Ok(r) => r,
+                // После неоднозначного кадра станция замолчала: старые запросы потеряны, а кадр, скорее
+                // всего, был нашим. Наверняка не узнать, поэтому журнал этой длины очистить и спросить ещё
+                // раз. Переспрос без очистки копил в журнале неотвеченные запросы, и блоки 100 и 140 по
+                // очереди блокировали друг друга без конца (2026-11-19).
+                Err(MissReason::Timeout) if wait_until < deadline => {
+                    unanswered.settle(count);
+                    if asks >= MAX_REASK {
+                        tracing::warn!("блок {addr}×{count}: ответы остаются неоднозначными, чтение не принято");
+                        return Err(MissReason::ModbusError);
+                    }
+                    asks += 1;
+                    tracing::info!("блок {addr}×{count}: ответ мог быть поздним ответом на другой блок, повтор");
+                    continue 'block;
+                }
+                Err(e) => return Err(e),
+            };
             match unanswered.claim(&resp, addr, count) {
                 Claim::Ours => break 'block resp,
                 Claim::Stray => tracing::debug!("блок {addr}×{count}: лишний кадр пропущен"),
-                Claim::Ambiguous if asks < MAX_REASK => {
-                    asks += 1;
-                    tracing::info!(
-                        "блок {addr}×{count}: ответ мог быть поздним ответом на другой блок, повтор"
-                    );
-                    continue 'block;
-                }
-                Claim::Ambiguous => {
-                    tracing::warn!("блок {addr}×{count}: ответы остаются неоднозначными, чтение не принято");
-                    return Err(MissReason::ModbusError);
-                }
+                // Старый запрос вычеркнут; наш ответ, если кадр был не им, придёт следом.
+                Claim::Ambiguous => wait_until = deadline.min(Instant::now() + opts.settle),
             }
         }
     };

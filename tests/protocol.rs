@@ -53,6 +53,8 @@ struct FakeStation {
     /// Ответы на чтение этого блока задерживаются и приходят перед ответом на следующий запрос.
     mute: Option<u16>,
     late: Vec<Vec<u8>>,
+    /// Запросы этого блока теряются: ответа на них не будет никогда.
+    lose: Option<u16>,
     /// Отвечать на запись исключением Modbus.
     refuse_write: bool,
 }
@@ -86,6 +88,7 @@ impl FakeStation {
             disconnected: false,
             mute: None,
             late: Vec::new(),
+            lose: None,
             refuse_write: false,
         }
     }
@@ -140,6 +143,9 @@ impl Transport for FakeStation {
             Phase::Plain => {
                 self.sent.push(Outgoing { raw: data.to_vec(), plain: Some(data.to_vec()) });
                 let resp = self.modbus_response(data);
+                if self.lose == Some(u16::from_be_bytes([data[2], data[3]])) {
+                    return Ok(());
+                }
                 if self.mute == Some(u16::from_be_bytes([data[2], data[3]])) {
                     self.late.push(resp);
                     return Ok(());
@@ -358,6 +364,84 @@ async fn late_answer_from_previous_read_is_set_aside() {
     assert_eq!(out.reading.ac_out_w, Some(182));
     assert_eq!(out.reading.dc_out_w, Some(4));
     let asked: Vec<u16> = st.sent.iter().map(|o| u16::from_be_bytes([o.raw[2], o.raw[3]])).collect();
-    // Первое чтение: 100, 140 (без ответа). Второе: 100 переспрошен, 140 переспрошен из-за лишнего ответа на 100.
-    assert_eq!(asked, [100, 140, 100, 100, 140, 140, 1314, 2020]);
+    // Первое чтение: 100, 140 (без ответа). Второе: поздний ответ на 140 вычеркнут, ответ на 100 пришёл следом,
+    // переспрашивать ничего не нужно.
+    assert_eq!(asked, [100, 140, 100, 140, 1314, 2020]);
+}
+
+fn settle_opts() -> ReadOptions {
+    ReadOptions {
+        answer_timeout: std::time::Duration::from_millis(300),
+        settle: std::time::Duration::from_millis(50),
+        ..fast_opts()
+    }
+}
+
+fn asked_blocks(st: &FakeStation) -> Vec<u16> {
+    st.sent.iter().map(|o| u16::from_be_bytes([o.raw[2], o.raw[3]])).collect()
+}
+
+/// Регрессия 2026-11-19: запросы на 140×10, потерянные станцией, копились в журнале, переспросы добавляли
+/// новые, и с тех пор каждое чтение срывалось («ответы остаются неоднозначными»), хотя станция отвечала.
+#[tokio::test]
+async fn lost_requests_do_not_block_reads_forever() {
+    let (keys, station_sign, client_verify) = test_keys();
+    let mut st = FakeStation::new(false, station_sign, client_verify);
+    let opts = settle_opts();
+    let mut unanswered = Unanswered::default();
+    st.lose = Some(140);
+    for ts in 1..=4 {
+        let r = read_station_tracked(&mut st, &keys, &opts, ts, &mut unanswered).await;
+        assert_eq!(r, Err(MissReason::Timeout), "чтение {ts}");
+    }
+
+    st.lose = None;
+    for ts in 5..=8 {
+        let out = read_station_tracked(&mut st, &keys, &opts, ts, &mut unanswered).await.expect("чтение");
+        assert_eq!(out.reading.soc, Some(64), "чтение {ts}");
+        assert_eq!(out.reading.ac_out_w, Some(182), "чтение {ts}");
+        assert_eq!(out.reading.dc_out_w, Some(4), "чтение {ts}");
+    }
+}
+
+/// Один потерянный запрос: после тишины журнал очищается, 100×10 переспрошен один раз, дальше без переспросов.
+#[tokio::test]
+async fn single_lost_request_costs_one_reask() {
+    let (keys, station_sign, client_verify) = test_keys();
+    let mut st = FakeStation::new(false, station_sign, client_verify);
+    let opts = settle_opts();
+    let mut unanswered = Unanswered::default();
+    st.lose = Some(140);
+    let r = read_station_tracked(&mut st, &keys, &opts, 1, &mut unanswered).await;
+    assert_eq!(r, Err(MissReason::Timeout));
+
+    st.lose = None;
+    st.sent.clear();
+    read_station_tracked(&mut st, &keys, &opts, 2, &mut unanswered).await.expect("чтение");
+    assert_eq!(asked_blocks(&st), [100, 100, 140, 1314, 2020]);
+    st.sent.clear();
+    read_station_tracked(&mut st, &keys, &opts, 3, &mut unanswered).await.expect("чтение");
+    assert_eq!(asked_blocks(&st), [100, 140, 1314, 2020]);
+}
+
+/// Поздний ответ из прошлого опроса и потерянные запросы вместе: в поля заряда не попадает чужой блок.
+#[tokio::test]
+async fn late_answer_after_lost_requests_still_set_aside() {
+    let (keys, station_sign, client_verify) = test_keys();
+    let mut st = FakeStation::new(false, station_sign, client_verify);
+    let opts = settle_opts();
+    let mut unanswered = Unanswered::default();
+    st.lose = Some(140);
+    for ts in 1..=2 {
+        let _ = read_station_tracked(&mut st, &keys, &opts, ts, &mut unanswered).await;
+    }
+    st.lose = None;
+    st.mute = Some(140);
+    let r = read_station_tracked(&mut st, &keys, &opts, 3, &mut unanswered).await;
+    assert!(r.is_err());
+
+    st.mute = None;
+    let out = read_station_tracked(&mut st, &keys, &opts, 4, &mut unanswered).await.expect("чтение");
+    assert_eq!(out.reading.soc, Some(64));
+    assert_eq!(out.reading.ac_out_w, Some(182));
 }
