@@ -41,3 +41,4 @@ dropped (`Unanswered::settle`) and the block is asked once more on a clean journ
 
 - `cargo test` all green, `cargo clippy --all-targets` clean; the three new tests fail on the previous code.
 - Installed 2026-11-19 13:33 UTC; live result below.
+- Live: readings at 15:33:37, 15:34:37, 15:35:37 (local) accepted, `stale: false`, no ambiguity warnings.
